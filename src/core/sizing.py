@@ -115,12 +115,21 @@ def plan_position(
     asset: AssetMeta,
     take_profit_price: float | None = None,
     max_stop_to_liq_ratio: float = 0.75,
+    clamp_to_leverage: bool = False,
 ) -> PositionPlan | Rejection:
     """Size a trade from the risk budget, or explain why it cannot be taken.
 
     `max_stop_to_liq_ratio` is how far toward liquidation the stop may sit. At the
     default 0.75 the stop must trigger well before the exchange closes the position
     for us — otherwise the stop is decorative and the real risk is the whole margin.
+
+    `clamp_to_leverage` cuts the size down to what the leverage allows instead of
+    refusing the trade. Off by default, because a silently resized trade is not the
+    trade the user asked for. It exists because a tight stop makes the requested
+    risk need more notional than the account can hold — a 0.18% stop and 3% risk
+    needs 17x, whatever the balance — and a strategy backtested that way is
+    measuring the clamped size, not the requested one. `PositionPlan.risk_usdc`
+    always reports what is genuinely at stake, so the caller can say so.
     """
     if entry_price <= 0 or stop_price <= 0:
         return Rejection(
@@ -169,12 +178,22 @@ def plan_position(
     notional = size * entry
     max_notional = equity_usdc * leverage
     if notional > max_notional:
-        return Rejection(
-            RejectReason.EXCEEDS_LEVERAGE_CAP,
-            f"needs {notional:.2f} USDC of notional but {leverage}x on "
-            f"{equity_usdc:.2f} USDC equity allows only {max_notional:.2f}; "
-            f"lower the risk per trade or the stop distance",
-        )
+        if not clamp_to_leverage:
+            return Rejection(
+                RejectReason.EXCEEDS_LEVERAGE_CAP,
+                f"needs {notional:.2f} USDC of notional but {leverage}x on "
+                f"{equity_usdc:.2f} USDC equity allows only {max_notional:.2f}; "
+                f"lower the risk per trade or the stop distance",
+            )
+        size = floor_size(max_notional / entry, asset.sz_decimals)
+        if size <= 0:
+            return Rejection(
+                RejectReason.SIZE_ROUNDS_TO_ZERO,
+                f"{leverage}x on {equity_usdc:.2f} USDC allows only "
+                f"{max_notional:.2f} of notional, which is less than one "
+                f"{10**-asset.sz_decimals:g} {asset.name} step at {entry:g}",
+            )
+        notional = size * entry
 
     liquidation = estimate_liquidation_price(entry, side, leverage, asset)
     liq_distance = abs(entry - liquidation)

@@ -90,6 +90,9 @@ class BotEngine:
         self._last_mark_at = 0.0
         self._last_candle_at = 0.0
         self._halted_for_the_day = False
+        #: Best price the open trade has seen, for the trailing stop. Cleared when
+        #: flat so the next trade does not inherit the last one's high-water mark.
+        self._peak_price: float | None = None
 
     @property
     def is_running(self) -> bool:
@@ -280,6 +283,11 @@ class BotEngine:
         if self._last_mark:
             for fill in await self.broker.sync(self._last_mark):
                 log.info("%s", fill)
+            # After settling, never before: a stop that has just triggered is not a
+            # stop to trail, and moving it first could push the level past a price
+            # that had already gone through it.
+            await self._trail_stop(self._last_mark)
+            await self._pull_entry_for_news()
 
         if now - self._last_candle_at >= self._candle_check_seconds:
             self._last_candle_at = now
@@ -341,15 +349,17 @@ class BotEngine:
         log.info("signal - %s: %s", signal.side.value.upper(), signal.reason)
 
         account = await self.broker.account_state()
+        requested = self.settings.risk_for(account.account_value)
         plan = plan_position(
             side=signal.side,
             entry_price=signal.entry_price,
             stop_price=signal.stop_price,
             take_profit_price=signal.take_profit_price,
-            risk_usdc=self.settings.risk_usdc,
+            risk_usdc=requested,
             equity_usdc=account.account_value,
             leverage=self.settings.leverage,
             asset=self.asset,
+            clamp_to_leverage=self.settings.clamp_size_to_leverage,
         )
         if isinstance(plan, Rejection):
             # Never silently resized and never forced through — the user is told why.
@@ -357,12 +367,122 @@ class BotEngine:
             return
 
         assert isinstance(plan, PositionPlan)
+        # Clamping is allowed but never silent: the whole reason the leverage cap
+        # exists is that the user chose it, and a trade risking half what they asked
+        # for is a different trade. Reported as a fraction of equity too, because
+        # that is the number a percentage setting was chosen in.
+        shortfall = requested - plan.risk_usdc
+        if shortfall > max(0.01, requested * 0.01):
+            log.warning(
+                "size capped by the %dx limit: risking %.2f USDC (%.2f%% of equity), "
+                "not the %.2f (%.2f%%) requested - the stop is %.2f%% away",
+                self.settings.leverage, plan.risk_usdc,
+                plan.risk_usdc / account.account_value * 100 if account.account_value else 0,
+                requested,
+                requested / account.account_value * 100 if account.account_value else 0,
+                abs(plan.entry_price - plan.stop_price) / plan.entry_price * 100,
+            )
         log.info("entering: %s", plan)
-        await self.broker.open_position(plan, self._last_mark or plan.entry_price)
+        if self.settings.post_only_entry:
+            # A duration, not a deadline: the engine knows how long a candle is, the
+            # broker knows what time it is, and only one of them should own each.
+            await self.broker.open_position(
+                plan,
+                self._last_mark or plan.entry_price,
+                post_only=True,
+                expire_after_ms=(
+                    self.settings.entry_expiry_candles
+                    * self.settings.timeframe.seconds
+                    * 1000
+                ),
+            )
+        else:
+            await self.broker.open_position(plan, self._last_mark or plan.entry_price)
+
+    async def _trail_stop(self, mark: float) -> None:
+        """Follow a winning trade up with its stop, never letting it back down.
+
+        The stop moves to `trailing_distance_pct` behind the best price the trade
+        has seen, once profit has reached `trailing_activation_rr` multiples of the
+        original risk. Both are settings because the right values are a property of
+        the strategy and the timeframe, not of this code.
+
+        The peak is measured from marks, so it is only as good as the polling — a
+        spike between two polls is not seen. That is the honest limit of trailing
+        without a tick feed, and it errs towards trailing less, never more.
+        """
+        if not self.settings.trailing_enabled:
+            return
+
+        held = await self.broker.managed_position()
+        if held is None or held.stop_price is None:
+            self._peak_price = None
+            return
+
+        side = held.position.side
+        entry = held.position.entry_price
+        if entry <= 0 or mark <= 0:
+            return
+
+        # Best price *for this trade*: the highest for a long, the lowest for a short.
+        if self._peak_price is None:
+            self._peak_price = mark
+        elif (mark - self._peak_price) * side.sign > 0:
+            self._peak_price = mark
+
+        risk = abs(entry - held.stop_price)
+        profit = (self._peak_price - entry) * side.sign
+        if risk <= 0 or profit < self.settings.trailing_activation_rr * risk:
+            return
+
+        candidate = self._peak_price * (
+            1 - side.sign * self.settings.trailing_distance_pct
+        )
+        # Only ever tighter, and only ever into profit. A trailing stop that could
+        # move away would give back what the trade has already earned, and one that
+        # sat below entry would not be locking anything in.
+        if (candidate - held.stop_price) * side.sign <= 0:
+            return
+        if (candidate - entry) * side.sign <= 0:
+            return
+
+        try:
+            await self.broker.move_stop(candidate)
+        except TRADING_ERRORS as exc:
+            # The existing stop is still with the venue, so the position is not
+            # unprotected — it is protected at the old level. Worth saying, not
+            # worth stopping for.
+            log.warning("could not move the trailing stop: %s", exc)
+
+    async def _pull_entry_for_news(self) -> None:
+        """Take a resting entry off the book when a release comes into range.
+
+        Blocking new entries is not enough once orders rest: an order placed in a
+        quiet hour is still sitting there when CPI lands, and a limit order into a
+        release is filled by exactly the sweep the blackout exists to avoid. So the
+        order is pulled, not merely not-replaced.
+
+        Only consulted when something is actually resting — the calendar is cached,
+        but a lookup per poll with nothing to cancel is noise for no benefit.
+
+        An open **position** is still left alone. Its stop is with the exchange and
+        closing on news would realise a loss the stop might never have taken; a
+        resting order has no such claim on being left where it is.
+        """
+        if self.broker.pending_entry() is None:
+            return
+        reason = await self._news_blocker()
+        if reason:
+            log.warning("pulling the resting entry - %s", reason)
+            await self.broker.cancel_entry()
 
     async def _reason_not_to_trade(self) -> str | None:
         if await self.broker.managed_position() is not None:
             return "already holding a position"
+        if self.broker.pending_entry() is not None:
+            # A second order while the first still rests would double the size if
+            # both filled, and the strategy has no view on the one already placed.
+            return "an entry order is already resting"
         if self.settings.economic_data_day_block:
             return "news blackout is on — economic data day"
         news = await self._news_blocker()

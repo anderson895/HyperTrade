@@ -28,6 +28,95 @@ def _plan(**overrides):
     return plan_position(**kwargs)
 
 
+# --- clamping to the leverage cap -----------------------------------------
+#
+# A tight stop needs a large position to risk the same amount, so the requested risk
+# routinely needs more notional than the account can hold - a 0.18% stop and 3% risk
+# needs about 17x whatever the balance is. Refusing is the default; clamping exists
+# because the user's strategy was backtested with it.
+
+TIGHT = dict(entry_price=63_000.0, stop_price=63_113.0, equity_usdc=100.0, leverage=5)
+
+
+def test_a_trade_that_will_not_fit_is_refused_by_default():
+    plan = _plan(side=Side.SHORT, risk_usdc=3.0, **TIGHT)
+
+    assert isinstance(plan, Rejection)
+    assert plan.reason is RejectReason.EXCEEDS_LEVERAGE_CAP
+
+
+def test_clamping_takes_the_trade_at_a_smaller_size():
+    plan = _plan(side=Side.SHORT, risk_usdc=3.0, clamp_to_leverage=True, **TIGHT)
+
+    assert isinstance(plan, PositionPlan)
+    assert plan.notional <= TIGHT["equity_usdc"] * TIGHT["leverage"]
+
+
+def test_a_clamped_plan_reports_what_is_really_at_stake():
+    """The danger of clamping is a trade risking half what was asked for while
+    still being described as a 3% trade."""
+    plan = _plan(side=Side.SHORT, risk_usdc=3.0, clamp_to_leverage=True, **TIGHT)
+
+    assert plan.risk_usdc < 3.0
+    assert plan.risk_usdc == pytest.approx(plan.size * 113.0, rel=1e-3)
+
+
+def test_clamping_leaves_a_trade_that_already_fits_alone():
+    loose = _plan(leverage=5)
+    clamped = _plan(leverage=5, clamp_to_leverage=True)
+
+    assert clamped.size == loose.size
+    assert clamped.risk_usdc == pytest.approx(loose.risk_usdc)
+
+
+def test_clamping_still_refuses_when_even_the_cap_rounds_to_zero():
+    """A cap smaller than one size step is not a small trade, it is no trade."""
+    plan = _plan(
+        entry_price=63_000.0, stop_price=62_990.0,
+        risk_usdc=1.0, equity_usdc=0.10, leverage=1, clamp_to_leverage=True,
+    )
+
+    assert isinstance(plan, Rejection)
+    assert plan.reason is RejectReason.SIZE_ROUNDS_TO_ZERO
+
+
+# --- risk as a fraction of equity ------------------------------------------
+
+
+def test_percent_risk_scales_with_the_account():
+    from src.config import AppSettings
+
+    settings = AppSettings(risk_pct=0.01)
+
+    assert settings.risk_for(100.0) == pytest.approx(1.0)
+    assert settings.risk_for(250.0) == pytest.approx(2.5)
+
+
+def test_a_fixed_risk_ignores_the_account_size():
+    from src.config import AppSettings
+
+    settings = AppSettings(risk_usdc=2.5)
+
+    assert settings.risk_for(100.0) == 2.5
+    assert settings.risk_for(10_000.0) == 2.5
+
+
+def test_a_percentage_takes_precedence_over_the_fixed_amount():
+    from src.config import AppSettings
+
+    settings = AppSettings(risk_usdc=5.0, risk_pct=0.02)
+
+    assert settings.risk_for(100.0) == pytest.approx(2.0)
+
+
+@pytest.mark.parametrize("pct", [-0.01, 0.30])
+def test_an_absurd_percentage_is_refused(pct):
+    from src.config import AppSettings
+
+    problems = AppSettings(risk_pct=pct).validate()
+    assert any("between 0% and 25%" in problem for problem in problems)
+
+
 # --- sizing ---------------------------------------------------------------
 
 

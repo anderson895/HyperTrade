@@ -33,6 +33,7 @@ from src.core.models import (  # noqa: E402
 from src.db import connect, get_ui_state, set_ui_state  # noqa: E402
 from src.logging_setup import LogLine  # noqa: E402
 from src.store import record_fill  # noqa: E402
+from src.strategy import available  # noqa: E402
 from src.ui.controller import Snapshot  # noqa: E402
 from src.ui import main_window  # noqa: E402
 from src.ui.about_page import AboutPage  # noqa: E402
@@ -235,6 +236,94 @@ def test_the_preview_names_settings_that_cannot_trade(qapp):
     verdict = page.preview_card.verdict.text()
     assert "Cannot trade" in verdict
     assert "needs 4x" in verdict
+
+
+def test_the_strategy_dropdown_offers_every_registered_strategy(qapp):
+    from src.strategy import available
+
+    page = SettingsPage(AppSettings())
+    offered = {page.strategy.itemData(i) for i in range(page.strategy.count())}
+
+    assert offered == set(available())
+
+
+def test_the_strategy_choice_round_trips(qapp):
+    page = SettingsPage(AppSettings())
+    page.load(AppSettings(strategy="volume_rejection"))
+
+    assert page.strategy.currentData() == "volume_rejection"
+    assert page.current().strategy == "volume_rejection"
+
+
+def test_a_saved_strategy_this_build_lost_falls_back_visibly(qapp):
+    """findData returns -1, and leaving the combo there would silently save
+    whatever happened to be first."""
+    page = SettingsPage(AppSettings())
+    page.load(AppSettings(strategy="deleted_strategy"))
+
+    assert page.strategy.currentIndex() == 0
+    assert page.current().strategy in available()
+
+
+def test_the_exit_settings_round_trip(qapp):
+    page = SettingsPage(AppSettings())
+    page.load(
+        AppSettings(
+            take_profit_rr=3.0,
+            stop_buffer_pct=0.005,
+            trailing_enabled=True,
+            trailing_activation_rr=1.0,
+            trailing_distance_pct=0.008,
+        )
+    )
+
+    assert page.take_profit.value() == 3.0
+    assert page.stop_buffer.value() == pytest.approx(0.5)   # shown as a percentage
+    assert page.trail_distance.value() == pytest.approx(0.8)
+
+    settings = page.current()
+    assert settings.take_profit_rr == 3.0
+    assert settings.stop_buffer_pct == pytest.approx(0.005)
+    assert settings.trailing_activation_rr == 1.0
+    assert settings.trailing_distance_pct == pytest.approx(0.008)
+
+
+def test_the_trailing_fields_grey_out_when_trailing_is_off(qapp):
+    page = SettingsPage(AppSettings())
+
+    page.trailing.setChecked(False)
+    assert not page.trail_distance.isEnabled()
+
+    page.trailing.setChecked(True)
+    assert page.trail_distance.isEnabled()
+
+
+def test_the_stop_buffer_only_applies_to_the_strategy_that_has_one(qapp):
+    """The trend follower measures its stop from ATR - there is no wick to buffer,
+    and a live-looking field that does nothing is worse than a greyed one."""
+    page = SettingsPage(AppSettings())
+
+    page.load(AppSettings(strategy="volume_rejection"))
+    assert page.stop_buffer.isEnabled()
+
+    page.load(AppSettings(strategy="trend_following"))
+    assert not page.stop_buffer.isEnabled()
+
+
+def test_the_strategy_note_is_right_from_the_moment_the_page_opens(qapp):
+    """Regression: the note and the greying were only refreshed when the dropdown
+    was touched, so a page opened on a saved strategy described nothing and left
+    Stop Buffer looking editable for a strategy that has no wick to buffer."""
+    page = SettingsPage(AppSettings(strategy="trend_following"))
+
+    assert page.strategy_note.text()
+    assert "ATR" in page.strategy_note.text()
+    assert not page.stop_buffer.isEnabled()
+
+    fresh = SettingsPage(AppSettings(strategy="volume_rejection"))
+
+    assert "breakout" in fresh.strategy_note.text().lower()
+    assert fresh.stop_buffer.isEnabled()
 
 
 def test_the_news_blackout_settings_round_trip(qapp):

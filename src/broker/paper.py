@@ -37,7 +37,15 @@ from ..core.models import (
 from ..core.precision import round_price
 from ..core.sizing import PositionPlan, estimate_liquidation_price
 from ..store import record_fill
-from .base import Broker, BrokerError, Fill, FillReason, ManagedPosition, now_ms
+from .base import (
+    Broker,
+    BrokerError,
+    Fill,
+    FillReason,
+    ManagedPosition,
+    PendingEntry,
+    now_ms,
+)
 
 log = logging.getLogger(__name__)
 
@@ -165,6 +173,11 @@ class PaperBroker(Broker):
             self._state = PaperState(balance=starting_balance)
             self._persist()
 
+        #: A resting maker entry. Deliberately not persisted: an order the exchange
+        #: would have cancelled while the app was shut must not come back to life
+        #: on restart, and in paper there is no exchange to ask.
+        self._pending: PendingEntry | None = None
+
     # --- Broker ----------------------------------------------------------
 
     @property
@@ -210,11 +223,44 @@ class PaperBroker(Broker):
             entry_time_ms=self._state.entry_time_ms,
         )
 
-    async def open_position(self, plan: PositionPlan, reference_price: float) -> Fill:
+    def pending_entry(self) -> PendingEntry | None:
+        return self._pending
+
+    async def cancel_entry(self) -> bool:
+        if self._pending is None:
+            return False
+        log.info("paper entry order cancelled at %g", self._pending.limit_price)
+        self._pending = None
+        return True
+
+    async def open_position(
+        self,
+        plan: PositionPlan,
+        reference_price: float,
+        *,
+        post_only: bool = False,
+        expire_after_ms: int | None = None,
+    ) -> Fill | None:
         if self._state.is_open:
             raise BrokerError(f"already holding a {self._state.side.value} position")
         if reference_price <= 0:
             raise BrokerError(f"invalid reference price {reference_price}")
+
+        if post_only:
+            if self._pending is not None:
+                raise BrokerError("an entry order is already resting")
+            now = self._clock()
+            self._pending = PendingEntry(
+                plan=plan,
+                limit_price=plan.entry_price,
+                placed_at_ms=now,
+                expire_at_ms=now + (expire_after_ms or 0),
+            )
+            log.info(
+                "PAPER entry resting: %s %g %s @ %g",
+                plan.side.value, plan.size, self.coin, plan.entry_price,
+            )
+            return None
 
         price = self._market_price(reference_price, plan.side, is_entry=True)
         fee = price * plan.size * self.fee_rate
@@ -244,6 +290,18 @@ class PaperBroker(Broker):
         log.info("PAPER %s", fill)
         return fill
 
+    async def move_stop(self, new_stop: float) -> bool:
+        """Nothing rests on an exchange here, so the stop is simply the new number.
+
+        `sync` reads it on the next poll, which is the same order of events as live:
+        the level changes first, and only a later price can trigger it.
+        """
+        if not self._state.is_open or new_stop <= 0:
+            return False
+        self._state.stop_price = new_stop
+        self._persist()
+        return True
+
     async def close_position(
         self, reference_price: float, reason: FillReason = FillReason.MANUAL_CLOSE
     ) -> Fill | None:
@@ -255,9 +313,15 @@ class PaperBroker(Broker):
     async def sync(self, mark_price: float) -> list[Fill]:
         if mark_price > 0:
             self._last_mark = mark_price
+
+        entry = await self._settle_pending_entry(mark_price)
         state = self._state
         if not state.is_open or mark_price <= 0:
-            return []
+            return entry
+        if entry:
+            # Just entered on this very poll. The stop and target cannot also have
+            # triggered against the same price without the entry being nonsense.
+            return entry
 
         sign = state.side.sign
 
@@ -277,6 +341,66 @@ class PaperBroker(Broker):
             return [self._settle(target, FillReason.TAKE_PROFIT)]
 
         return []
+
+    async def _settle_pending_entry(self, mark_price: float) -> list[Fill]:
+        """Fill or expire a resting entry.
+
+        A maker order fills when the market comes to it — strictly through the
+        limit, not merely touching it. Sitting at the touch is the back of the
+        queue, and counting that as filled is the single easiest way to make a
+        post-only backtest look better than the real thing.
+
+        No fee is charged: Hyperliquid pays makers less than it charges takers, and
+        modelling the rebate as zero keeps paper on the pessimistic side of live.
+        """
+        pending = self._pending
+        if pending is None:
+            return []
+
+        now = self._clock()
+        if mark_price > 0:
+            filled = (
+                mark_price < pending.limit_price
+                if pending.plan.side.is_buy
+                else mark_price > pending.limit_price
+            )
+            if filled:
+                self._pending = None
+                return [self._fill_entry(pending, pending.limit_price)]
+
+        if pending.expired(now):
+            self._pending = None
+            log.info(
+                "entry order expired unfilled at %g - the pullback never came",
+                pending.limit_price,
+            )
+        return []
+
+    def _fill_entry(self, pending: PendingEntry, price: float) -> Fill:
+        plan = pending.plan
+        state = self._state
+        state.coin = self.coin
+        state.side = plan.side
+        state.size = plan.size
+        state.entry_price = price
+        state.stop_price = plan.stop_price
+        state.take_profit_price = plan.take_profit_price
+        state.entry_time_ms = self._clock()
+        state.entry_fee = 0.0
+        self._last_mark = price
+
+        fill = Fill(
+            time_ms=state.entry_time_ms,
+            coin=self.coin,
+            side=plan.side,
+            size=plan.size,
+            price=price,
+            fee=0.0,
+            reason=FillReason.ENTRY,
+        )
+        self._commit(fill)
+        log.info("PAPER %s (maker)", fill)
+        return fill
 
     # --- paper-only ------------------------------------------------------
 

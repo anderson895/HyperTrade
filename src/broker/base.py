@@ -22,7 +22,15 @@ from ..core.models import (
 from ..core.sizing import PositionPlan
 
 # Re-exported so callers can keep importing them from the broker package.
-__all__ = ["Broker", "BrokerError", "Fill", "FillReason", "ManagedPosition", "now_ms"]
+__all__ = [
+    "Broker",
+    "BrokerError",
+    "Fill",
+    "FillReason",
+    "ManagedPosition",
+    "PendingEntry",
+    "now_ms",
+]
 
 
 class BrokerError(RuntimeError):
@@ -37,6 +45,26 @@ class ManagedPosition:
     stop_price: float | None
     take_profit_price: float | None
     entry_time_ms: int
+
+
+@dataclass
+class PendingEntry:
+    """An entry order resting on the book, not yet filled.
+
+    A post-only entry is a bet that price comes back to you. It often does not, and
+    an order left sitting after the move that justified it has gone stale is worse
+    than no order — so it carries its own expiry rather than relying on anyone
+    remembering to cancel it.
+    """
+
+    plan: PositionPlan
+    limit_price: float
+    placed_at_ms: int
+    expire_at_ms: int
+    oid: int | None = None
+
+    def expired(self, now_ms: int) -> bool:
+        return now_ms >= self.expire_at_ms
 
 
 def now_ms() -> int:
@@ -76,13 +104,48 @@ class Broker(ABC):
         """Apply the leverage setting before the first order."""
 
     @abstractmethod
-    async def open_position(self, plan: PositionPlan, reference_price: float) -> Fill:
+    async def open_position(
+        self,
+        plan: PositionPlan,
+        reference_price: float,
+        *,
+        post_only: bool = False,
+        expire_after_ms: int | None = None,
+    ) -> Fill | None:
         """Enter, and arrange the stop and take profit.
 
         `reference_price` is the price to work from — the top of the book on the
         side being crossed when it is known, otherwise the mid. Both implementations
         need it: Live prices its IOC limit through the book from here, and Paper
         simulates its fill from here.
+
+        `post_only` rests a maker order at the plan's entry price instead of
+        crossing the spread, and returns **None**: there is no fill yet, and there
+        may never be one. `sync` reports it if it comes, and cancels the order once
+        `expire_after_ms` has passed if it does not. The exits are attached on fill,
+        not on placement — reduce-only orders against a position that does not exist
+        are not protection.
+
+        A duration rather than a deadline, because the broker owns the clock. The
+        engine knows how long a candle is; only the broker knows what time it thinks
+        it is, and the two disagreeing put the expiry decades away.
+        """
+
+    @abstractmethod
+    def pending_entry(self) -> PendingEntry | None:
+        """The entry order resting on the book, if there is one."""
+
+    @abstractmethod
+    async def cancel_entry(self) -> bool:
+        """Cancel a resting entry. False when there was nothing to cancel."""
+
+    @abstractmethod
+    async def move_stop(self, new_stop: float) -> bool:
+        """Move the resting stop. Returns False when there is nothing to move.
+
+        Only ever called to tighten one — the engine will not loosen a stop, and a
+        venue that accepted a looser one would be handing back protection the trade
+        has already earned.
         """
 
     @abstractmethod

@@ -205,28 +205,40 @@ class BotController(QObject):
         if not distance:
             return result
 
+        # Sized exactly as the engine would size it, including the percentage form
+        # and the clamp. A preview that ignored either would answer a question
+        # nobody asked — the point of this card is "will *these* settings trade".
+        requested = settings.risk_for(account.account_value)
         plan = plan_position(
             side=Side.LONG,
             entry_price=price,
             stop_price=price - distance,
-            risk_usdc=settings.risk_usdc,
+            risk_usdc=requested,
             equity_usdc=account.account_value,
             leverage=settings.leverage,
             asset=self.session.asset,
+            clamp_to_leverage=settings.clamp_size_to_leverage,
         )
         if isinstance(plan, Rejection):
             result.problem = plan.reason.value.replace("_", " ")
             if plan.reason is RejectReason.EXCEEDS_LEVERAGE_CAP:
                 needed = minimum_leverage_for(
-                    settings.risk_usdc, distance, price, account.account_value
+                    requested, distance, price, account.account_value
                 )
-                fits = settings.risk_usdc * settings.leverage / needed
+                fits = requested * settings.leverage / needed
                 result.hint = f"needs {needed}x, or risk of about {fits:,.2f} USDC"
             return result
 
         result.size = plan.size
         result.notional = plan.notional
         result.margin = plan.margin_required
+        # Clamping silently halves the stake, so the card that exists to say what
+        # these settings do has to say that too.
+        if plan.risk_usdc < requested * 0.99:
+            result.hint = (
+                f"capped by {settings.leverage}x: risking {plan.risk_usdc:,.2f} USDC, "
+                f"not the {requested:,.2f} asked for"
+            )
         return result
 
     # --- polling ---------------------------------------------------------

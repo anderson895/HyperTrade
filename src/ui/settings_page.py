@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
 from .. import secrets_store
 from ..config import AppSettings
 from ..core.models import MarginMode, Network, Timeframe, TradingMode
+from ..strategy import available
 from . import theme
 from .chrome import PageHeader
 from .widgets import NOTE_WIDTH, TitledCard, note_label, wrapped_label
@@ -125,6 +126,9 @@ class SettingsPage(QWidget):
         left = QVBoxLayout()
         left.setSpacing(16)
         left.addWidget(self._build_account_card())
+        # Under Account rather than inside Trading: the exits are a set of numbers
+        # that belong together, and the Trading card is already dense.
+        left.addWidget(self._build_exits_card())
         left.addStretch()
 
         right = QVBoxLayout()
@@ -162,6 +166,7 @@ class SettingsPage(QWidget):
         self.load(settings)
         self.mode.currentIndexChanged.connect(self._refresh_notes)
         self.timeframe.currentIndexChanged.connect(self._refresh_notes)
+        self.strategy.currentIndexChanged.connect(self._refresh_strategy_note)
 
         # Anything that changes the shape of a trade re-asks for a preview.
         for widget in (self.timeframe, self.margin):
@@ -225,8 +230,77 @@ class SettingsPage(QWidget):
         card.finish()
         return card
 
+    def _build_exits_card(self) -> TitledCard:
+        """Where a trade gets out: the target, and the stop that follows it up."""
+        card = TitledCard("fa6s.right-from-bracket", "Exit Rules")
+        card.start_grid()
+
+        self.take_profit = QDoubleSpinBox()
+        self.take_profit.setRange(0.1, 20.0)
+        self.take_profit.setDecimals(1)
+        self.take_profit.setSingleStep(0.5)
+        self.take_profit.setSuffix(" R")
+        self.take_profit.setToolTip(
+            "Target as a multiple of the stop distance.\n"
+            "2R means a 60,000 entry with a stop at 59,000 targets 62,000."
+        )
+        card.grid_field("Take Profit", self.take_profit, 0)
+
+        self.stop_buffer = QDoubleSpinBox()
+        self.stop_buffer.setRange(0.0, 20.0)
+        self.stop_buffer.setDecimals(2)
+        self.stop_buffer.setSingleStep(0.05)
+        self.stop_buffer.setSuffix(" %")
+        self.stop_buffer.setToolTip(
+            "How far past the rejection wick the stop sits.\n"
+            "Volume rejection only - the trend follower measures its stop from ATR."
+        )
+        card.grid_field("Stop Buffer", self.stop_buffer, 1)
+
+        self.trail_activation = QDoubleSpinBox()
+        self.trail_activation.setRange(0.0, 10.0)
+        self.trail_activation.setDecimals(1)
+        self.trail_activation.setSingleStep(0.5)
+        self.trail_activation.setSuffix(" R")
+        self.trail_activation.setToolTip(
+            "Profit needed before the stop starts following.\n"
+            "0 starts as soon as trailing would sit better than the original stop."
+        )
+        card.grid_field("Trail Activation", self.trail_activation, 0)
+
+        self.trail_distance = QDoubleSpinBox()
+        self.trail_distance.setRange(0.01, 20.0)
+        self.trail_distance.setDecimals(2)
+        self.trail_distance.setSingleStep(0.1)
+        self.trail_distance.setSuffix(" %")
+        self.trail_distance.setToolTip("How far behind the best price the stop trails.")
+        card.grid_field("Trail Distance", self.trail_distance, 1)
+
+        self.trailing = QCheckBox("Move the stop up behind a winning trade")
+        card.field("Trailing Stop", self.trailing)
+        card.note(
+            "A trailing stop protects profit but takes you out earlier. Widening the "
+            "stop or lowering the target changes how often you win and how much each "
+            "win pays - measure it, do not guess: tools/run_backtest.py."
+        )
+        self.trailing.toggled.connect(self._refresh_trailing_fields)
+
+        card.finish()
+        return card
+
     def _build_trading_card(self) -> TitledCard:
         card = TitledCard("fa6s.chart-line", "Trading Configuration")
+
+        self.strategy = QComboBox()
+        for key, cls in sorted(available().items()):
+            self.strategy.addItem(cls.display_name, key)
+        self.strategy.setToolTip(
+            "Trend following buys breakouts; volume rejection fades them.\n"
+            "They disagree by design, so only one runs at a time."
+        )
+        card.field("Strategy", self.strategy)
+        self.strategy_note = card.note()
+
         card.start_grid()
 
         self.timeframe = QComboBox()
@@ -235,10 +309,25 @@ class SettingsPage(QWidget):
         card.grid_field("Timeframe", self.timeframe, 0)
 
         self.risk = QDoubleSpinBox()
-        self.risk.setRange(0.1, 100_000.0)
+        self.risk.setRange(0.01, 100_000.0)
         self.risk.setDecimals(2)
-        self.risk.setSuffix(" USDC")
-        card.grid_field("Risk Per Trade", self.risk, 1)
+        self.risk_unit = QComboBox()
+        self.risk_unit.addItem("USDC", "usdc")
+        self.risk_unit.addItem("% of equity", "pct")
+        self.risk_unit.setFixedWidth(104)
+        self.risk_unit.setToolTip(
+            "A fixed USDC amount stays the same as the account moves.\n"
+            "A percentage compounds both ways - the stake grows with a winning\n"
+            "account and shrinks with a losing one."
+        )
+        risk_row = QWidget()
+        risk_layout = QHBoxLayout(risk_row)
+        risk_layout.setContentsMargins(0, 0, 0, 0)
+        risk_layout.setSpacing(6)
+        risk_layout.addWidget(self.risk)
+        risk_layout.addWidget(self.risk_unit)
+        card.grid_field("Risk Per Trade", risk_row, 1)
+        self.risk_unit.currentIndexChanged.connect(self._refresh_risk_unit)
 
         self.leverage = QSpinBox()
         self.leverage.setRange(1, 40)
@@ -270,10 +359,19 @@ class SettingsPage(QWidget):
         card.grid_field("Daily Loss Limit", self.daily_loss, 0, span=2)
 
         self.timeframe_note = card.note()
+
+        self.clamp_size = QCheckBox("Cap the size at the leverage limit")
+        self.clamp_size.setToolTip(
+            "Off: a trade that does not fit is refused, and the log says why.\n"
+            "On: the size is cut down to what the leverage allows, so the trade\n"
+            "goes on at a smaller risk than requested. The log says by how much."
+        )
+        card.field("When the risk will not fit", self.clamp_size)
         card.note(
-            "Risk decides the position size; leverage only caps it. Too little "
-            "leverage for the risk means no trades at all, which is why the card on "
-            "the right sizes one for you."
+            "Risk decides the position size; leverage only caps it. A tight stop "
+            "needs a large position to risk the same amount, so a 0.2% stop and 3% "
+            "risk needs about 17x whatever the balance is - cap the size and the "
+            "real risk lands near 1.4%, refuse it and nothing trades."
         )
 
         self.news_auto = QCheckBox("Pause around high-impact US releases")
@@ -318,7 +416,12 @@ class SettingsPage(QWidget):
         self.network.setCurrentIndex(self.network.findData(settings.network))
         self.timeframe.setCurrentIndex(self.timeframe.findData(settings.timeframe))
         self.margin.setCurrentIndex(self.margin.findData(settings.margin_mode))
-        self.risk.setValue(settings.risk_usdc)
+        self.risk_unit.setCurrentIndex(1 if settings.risk_pct else 0)
+        self.risk.setValue(
+            settings.risk_pct * 100 if settings.risk_pct else settings.risk_usdc
+        )
+        self._refresh_risk_unit()
+        self.clamp_size.setChecked(settings.clamp_size_to_leverage)
         self.leverage.setValue(settings.leverage)
         self.balance.setValue(settings.paper_starting_balance)
         self.slippage.setValue(settings.slippage * 100)
@@ -328,6 +431,20 @@ class SettingsPage(QWidget):
         self.news_before.setValue(settings.news_blackout_before_min)
         self.news_after.setValue(settings.news_blackout_after_min)
         self._refresh_news_fields()
+
+        index = self.strategy.findData(settings.strategy)
+        # A saved strategy this build no longer has would set the combo to -1 and
+        # silently save the first entry back. Fall back visibly instead.
+        self.strategy.setCurrentIndex(index if index >= 0 else 0)
+        self.take_profit.setValue(settings.take_profit_rr)
+        self.stop_buffer.setValue(settings.stop_buffer_pct * 100)
+        self.trailing.setChecked(settings.trailing_enabled)
+        self.trail_activation.setValue(settings.trailing_activation_rr)
+        self.trail_distance.setValue(settings.trailing_distance_pct * 100)
+        self._refresh_trailing_fields()
+        # Also on load, not only when the dropdown is touched: the page opens on a
+        # saved strategy, and the note and the greying describe *that* one.
+        self._refresh_strategy_note()
         self.address.setText(settings.account_address)
         self._refresh_notes()
 
@@ -337,7 +454,12 @@ class SettingsPage(QWidget):
         settings.network = self.network.currentData()
         settings.timeframe = self.timeframe.currentData()
         settings.margin_mode = self.margin.currentData()
-        settings.risk_usdc = self.risk.value()
+        if self.risk_unit.currentData() == "pct":
+            settings.risk_pct = self.risk.value() / 100
+        else:
+            settings.risk_pct = 0.0
+            settings.risk_usdc = self.risk.value()
+        settings.clamp_size_to_leverage = self.clamp_size.isChecked()
         settings.leverage = self.leverage.value()
         settings.paper_starting_balance = self.balance.value()
         settings.slippage = self.slippage.value() / 100
@@ -347,6 +469,12 @@ class SettingsPage(QWidget):
         settings.news_blackout_before_min = self.news_before.value()
         settings.news_blackout_after_min = self.news_after.value()
         settings.account_address = self.address.text().strip()
+        settings.strategy = self.strategy.currentData()
+        settings.take_profit_rr = self.take_profit.value()
+        settings.stop_buffer_pct = self.stop_buffer.value() / 100
+        settings.trailing_enabled = self.trailing.isChecked()
+        settings.trailing_activation_rr = self.trail_activation.value()
+        settings.trailing_distance_pct = self.trail_distance.value() / 100
         return settings
 
     def set_max_leverage(self, maximum: int) -> None:
@@ -363,6 +491,9 @@ class SettingsPage(QWidget):
             self.mode, self.network, self.timeframe, self.margin, self.risk,
             self.leverage, self.balance, self.slippage, self.daily_loss,
             self.address, self.agent_key, self.button_save, self.button_reset,
+            self.strategy, self.take_profit, self.stop_buffer,
+            self.trailing, self.trail_activation, self.trail_distance,
+            self.risk_unit, self.clamp_size,
         ):
             widget.setEnabled(enabled)
         self.news_block.setEnabled(True)
@@ -376,6 +507,37 @@ class SettingsPage(QWidget):
         live = self.news_auto.isChecked()
         self.news_before.setEnabled(live)
         self.news_after.setEnabled(live)
+
+    def _refresh_risk_unit(self) -> None:
+        """The suffix and the sensible range both depend on the unit."""
+        if self.risk_unit.currentData() == "pct":
+            self.risk.setSuffix(" %")
+            self.risk.setRange(0.01, 25.0)
+        else:
+            self.risk.setSuffix(" USDC")
+            self.risk.setRange(0.01, 100_000.0)
+
+    def _refresh_trailing_fields(self) -> None:
+        on = self.trailing.isChecked()
+        self.trail_activation.setEnabled(on)
+        self.trail_distance.setEnabled(on)
+
+    def _refresh_strategy_note(self) -> None:
+        """Say what the chosen strategy does, and which fields it ignores."""
+        chosen = self.strategy.currentData()
+        if chosen == "volume_rejection":
+            text = (
+                "Fades failed breakouts: price pushes past the 24-hour range on "
+                "high volume, is rejected, and closes back inside. The stop sits "
+                "past the rejection wick."
+            )
+        else:
+            text = (
+                "Follows breakouts: an EMA crossover on candle close, with the stop "
+                "measured from ATR. Stop Buffer does not apply to it."
+            )
+        self.strategy_note.setText(text)
+        self.stop_buffer.setEnabled(chosen == "volume_rejection")
 
     def _refresh_notes(self) -> None:
         live = self.mode.currentData() is TradingMode.LIVE

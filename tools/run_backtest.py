@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from src.backtest import run_backtest  # noqa: E402
 from src.core.models import Timeframe  # noqa: E402
 from src.data.hl_info import HyperliquidInfo  # noqa: E402
-from src.strategy import TrendFollowing  # noqa: E402
+from src.strategy import create  # noqa: E402
 
 #: How much history to pull per timeframe. Short timeframes need paging past the
 #: 5000-candle cap; long ones are limited by how long BTC has traded on Hyperliquid.
@@ -38,11 +38,25 @@ CANDLE_COUNTS = {
     Timeframe.W1: 600,
 }
 
-CONFIGS: dict[str, dict] = {
-    "no filter": {},
-    "slope lb=20": {"slope_lookback": 20},
-    "EMA200 trend": {"trend_filter_period": 200},
-    "EMA200 + lb20": {"trend_filter_period": 200, "slope_lookback": 20},
+#: Variants to compare, per strategy. Each entry is a set of constructor overrides;
+#: the point is to read the columns against each other, not to admire one number.
+CONFIGS: dict[str, dict[str, dict]] = {
+    "trend_following": {
+        "no filter": {},
+        "slope lb=20": {"slope_lookback": 20},
+        "EMA200 trend": {"trend_filter_period": 200},
+        "EMA200 + lb20": {"trend_filter_period": 200, "slope_lookback": 20},
+    },
+    # The knobs the user actually has in Settings, so the table answers "what should
+    # I set these to" rather than some question nobody asked.
+    "volume_rejection": {
+        "spec 0.1% 2R": {},
+        "buffer 0.4% 2R": {"stop_buffer": 0.004},
+        "buffer 0.8% 2R": {"stop_buffer": 0.008},
+        "spec 0.1% 1.5R": {"take_profit_rr": 1.5},
+        "spec 0.1% 1R": {"take_profit_rr": 1.0},
+        "buffer 0.8% 1R": {"stop_buffer": 0.008, "take_profit_rr": 1.0},
+    },
 }
 
 
@@ -69,23 +83,30 @@ def main() -> int:
         help="e.g. 1h 4h 1d (default: all seven)",
     )
     parser.add_argument("--fee-bps", type=float, default=4.5)
+    parser.add_argument(
+        "--strategy",
+        default="trend_following",
+        choices=sorted(CONFIGS),
+        help="which strategy's variants to compare",
+    )
     args = parser.parse_args()
 
     timeframes = [Timeframe(value) for value in args.timeframes]
+    variants = CONFIGS[args.strategy]
 
     print(f"Fetching {args.coin} candles from Hyperliquid...")
     history = asyncio.run(fetch(args.coin, timeframes))
 
-    print(f"\nTrend following, {args.fee_bps}bps round-trip fees, stop 2xATR, target 2R")
+    print(f"\n{args.strategy}, {args.fee_bps}bps round-trip fees")
     print("Expectancy is R per trade, net of fees. Positive is profitable.\n")
 
-    totals: dict[str, list[float]] = {label: [] for label in CONFIGS}
+    totals: dict[str, list[float]] = {label: [] for label in variants}
 
     for timeframe in timeframes:
         candles = history[timeframe]
         print(f"--- {timeframe.label} ({len(candles):,} candles) ---")
-        for label, params in CONFIGS.items():
-            strategy = TrendFollowing(**params)
+        for label, params in variants.items():
+            strategy = create(args.strategy, **params)
             if len(candles) <= strategy.warmup_candles:
                 print(f"  {label:15s} not enough history (needs {strategy.warmup_candles})")
                 continue

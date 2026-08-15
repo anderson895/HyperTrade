@@ -392,6 +392,62 @@ async def test_the_configured_window_reaches_the_calendar(conn):
     assert seen == {"before": 45, "after": 5}
 
 
+async def test_a_resting_entry_is_pulled_when_a_release_comes_into_range(conn):
+    """Blocking new entries is not enough once orders rest: one placed in a quiet
+    hour is still on the book when CPI lands, and a limit order into a release is
+    filled by exactly the sweep the blackout exists to avoid."""
+    engine, broker = build(conn, FakeCalendar(None), post_only_entry=True)
+    await engine.prepare()
+    await engine._on_candle_close()
+    assert broker.pending_entry() is not None
+
+    engine.calendar = FakeCalendar("news blackout: CPI m/m in 12 min")
+    await engine._pull_entry_for_news()
+
+    assert broker.pending_entry() is None
+
+
+async def test_a_resting_entry_survives_a_clear_calendar(conn):
+    engine, broker = build(conn, FakeCalendar(None), post_only_entry=True)
+    await engine.prepare()
+    await engine._on_candle_close()
+
+    await engine._pull_entry_for_news()
+
+    assert broker.pending_entry() is not None
+
+
+async def test_an_unreadable_calendar_also_pulls_the_entry(conn):
+    """Fail closed here too: not knowing whether CPI is minutes away is not a
+    reason to leave an order sitting where a sweep would fill it."""
+    engine, broker = build(conn, FakeCalendar(None), post_only_entry=True)
+    await engine.prepare()
+    await engine._on_candle_close()
+
+    engine.calendar = FakeCalendar(unavailable=True)
+    await engine._pull_entry_for_news()
+
+    assert broker.pending_entry() is None
+
+
+async def test_the_calendar_is_not_consulted_with_nothing_resting(conn):
+    """A lookup per poll with no order to cancel is noise for no benefit."""
+    calendar = FakeCalendar(None)
+    engine, _ = build(conn, calendar)
+    await engine.prepare()
+
+    await engine._pull_entry_for_news()
+
+    assert calendar.calls == 0
+
+
+def test_the_blackout_window_is_symmetric_by_default():
+    """The spec this app implements was backtested against 30 minutes either side."""
+    settings = AppSettings()
+    assert settings.news_blackout_before_min == 30
+    assert settings.news_blackout_after_min == 30
+
+
 async def test_an_open_position_is_left_alone_through_a_release(conn):
     """Standing aside holds back new entries. Closing a live position on news would
     realise a loss the stop might never have taken."""

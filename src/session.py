@@ -26,9 +26,12 @@ from .core.models import AssetMeta
 from .data.calendar import EconomicCalendar
 from .data.hl_info import HyperliquidInfo
 from .engine import DEFAULT_POLL_SECONDS, BotEngine
-from .strategy import TrendFollowing
+from .strategy import Strategy, create
 
 log = logging.getLogger(__name__)
+
+#: Used when the saved strategy cannot be built. Matches `AppSettings.strategy`.
+DEFAULT_STRATEGY = "trend_following"
 
 
 class Session:
@@ -63,7 +66,7 @@ class Session:
             settings=self.settings,
             info=self.info,
             broker=self.broker,
-            strategy=TrendFollowing(),
+            strategy=self._build_strategy(),
             asset=self.asset,
             conn=self._conn,
             calendar=self.calendar,
@@ -84,6 +87,34 @@ class Session:
             await self.engine.stop()
         await self.calendar.aclose()
         await self.info.aclose()
+
+    def _build_strategy(self) -> Strategy:
+        """The chosen strategy, given the exit settings it understands.
+
+        Only parameters the strategy actually declares are passed. The two differ:
+        the trend follower sizes its stop from ATR and has no wick to buffer, so
+        handing it `stop_buffer` would be a TypeError rather than a setting quietly
+        doing nothing.
+        """
+        settings = self.settings
+        shared = {"take_profit_rr": settings.take_profit_rr}
+        if settings.strategy == "volume_rejection":
+            shared["stop_buffer"] = settings.stop_buffer_pct
+        elif settings.strategy == "trend_following":
+            shared = {"reward_risk": settings.take_profit_rr}
+
+        try:
+            return create(settings.strategy, **shared)
+        except (KeyError, TypeError) as exc:
+            # A saved config naming a strategy this build no longer has, or one
+            # whose parameters have changed. Falling back is better than refusing
+            # to start, but it must be loud: the bot would otherwise trade a system
+            # the user did not choose.
+            log.error(
+                "could not build strategy %r (%s) - falling back to %s",
+                settings.strategy, exc, DEFAULT_STRATEGY,
+            )
+            return create(DEFAULT_STRATEGY)
 
     # --- brokers ---------------------------------------------------------
 
