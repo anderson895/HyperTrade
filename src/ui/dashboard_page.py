@@ -217,6 +217,9 @@ class DashboardPage(QWidget):
         root.addLayout(body_row, stretch=1)
 
         self._candles: list = []
+        #: What the loaded candles are, so the percentage can say which close it
+        #: measured against. None until the first load.
+        self._candles_timeframe: Timeframe | None = None
 
     # ------------------------------------------------------------------ slots
 
@@ -254,8 +257,10 @@ class DashboardPage(QWidget):
 
         self.set_balance(snapshot.equity, snapshot.mode, snapshot.margin_used)
 
-    def load_candles(self, candles, forming=None) -> None:
+    def load_candles(self, candles, forming=None, timeframe: Timeframe | None = None) -> None:
+        """`timeframe` is what these candles are, so the percentage can name it."""
         self._candles = candles
+        self._candles_timeframe = timeframe
         self.chart.load_candles(candles, forming)
 
     def _on_style_changed(self, index: int) -> None:
@@ -303,6 +308,12 @@ class DashboardPage(QWidget):
         Measured against the last close rather than a fixed 24-hour window, which
         would quietly mean a week on the weekly chart, and rather than the price when
         the app opened, which reads 0.00% for as long as anyone is watching.
+
+        The label names *which* close. The reference is the last of whatever candles
+        are loaded, and that changes with the range — so the same price read +0.00%
+        against a 5m close and -0.06% against a 4h one, with nothing on screen to
+        say why. It is worst on the live view, which fetches no candles of its own
+        and so keeps the previous range's, hours old and no longer drawn.
         """
         if not self._candles or self._candles[-1].close <= 0:
             self._pct_label.setText("")
@@ -310,7 +321,8 @@ class DashboardPage(QWidget):
 
         change = (mark / self._candles[-1].close - 1) * 100
         colour = theme.GREEN if change >= 0 else theme.RED
-        self._pct_label.setText(f"{change:+.2f}% since last close")
+        interval = f"{self._candles_timeframe.value} " if self._candles_timeframe else ""
+        self._pct_label.setText(f"{change:+.2f}% since last {interval}close")
         self._pct_label.setStyleSheet(f"color: {colour}; font-size: 15px; font-weight: bold")
 
     def set_balance(self, equity: float, mode: TradingMode, margin_used: float) -> None:

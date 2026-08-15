@@ -381,8 +381,9 @@ class MainWindow(QMainWindow):
         if len(candles) < 2:
             return
         # The last is still forming, so it is handed over separately and the live
-        # price keeps stretching it between fetches.
-        self.dash.load_candles(candles[:-1], candles[-1])
+        # price keeps stretching it between fetches. The timeframe rides along so the
+        # percentage beside the price can name the close it measured against.
+        self.dash.load_candles(candles[:-1], candles[-1], timeframe)
 
     async def _refresh_preview(self) -> None:
         """Re-size a hypothetical trade under whatever is on the Settings form.

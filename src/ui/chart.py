@@ -104,7 +104,13 @@ class PriceChart(pg.PlotWidget):
             axis.setPen(theme.BORDER)
             axis.setTickFont(tick_font)
         self.setMenuEnabled(False)
-        self.setMouseEnabled(x=True, y=False)
+        # No dragging, and no auto-range button offering to undo it. The range
+        # selector is the view control; `_redraw` re-applies its range on every
+        # live price, once a second, so a pan was discarded before the hand left
+        # the mouse. An interaction that visibly does nothing is worse than one
+        # that is not offered.
+        self.setMouseEnabled(x=False, y=False)
+        self.plotItem.hideButtons()
 
         self._candlesticks = CandlestickItem()
         self.addItem(self._candlesticks)
@@ -276,7 +282,19 @@ class PriceChart(pg.PlotWidget):
         # Both ranges are set explicitly rather than left to auto-range, which also
         # fits the infinite mark and level lines and left the x axis stuck on its
         # empty-plot default.
-        self.setXRange(-1, max(1, len(candles)), padding=0.01)
+        #
+        # How far the drawing actually reaches depends on the style: a candle is a
+        # body BODY_WIDTH wide centred on its index, a line is a point exactly on
+        # it. Ranging to -1..len either way left a whole empty slot at each end —
+        # on the 1H line view that is 12 points inside 13 units, 15% of the width
+        # blank, and the chart reads as though it stops short of the price.
+        last = len(candles) - 1
+        if self._style == "candles":
+            # Half a body of air, so the outermost candles do not touch the axis.
+            left, right = -BODY_WIDTH, last + BODY_WIDTH
+        else:
+            left, right = 0, last
+        self.setXRange(left, max(right, left + 1), padding=0.01)
 
         span = [candle.high for candle in candles] + [candle.low for candle in candles]
         span += self._levels

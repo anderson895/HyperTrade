@@ -442,6 +442,95 @@ def test_dashboard_log_panel_keeps_the_newest_first(qapp):
     assert "first" in page._log_list.item(1).text()
 
 
+def test_the_chart_offers_no_interaction_it_cannot_honour(qapp):
+    """Regression: dragging was enabled, but `set_mark` redraws once a second and
+    re-applies the range, so a pan was discarded before the hand left the mouse -
+    and pyqtgraph's auto-range button sat in the corner offering to undo something
+    that undid itself. The range selector is the view control."""
+    page = DashboardPage()
+    page.load_candles(make_candles(20))
+
+    assert page.chart.getViewBox().state["mouseEnabled"] == [False, False]
+    assert page.chart.plotItem.autoBtn is None or not page.chart.plotItem.autoBtn.isVisible()
+
+
+def test_the_chart_still_follows_the_live_price(qapp):
+    """The other half: locking the view must not stop it tracking new candles."""
+    page = DashboardPage()
+    page.load_candles(make_candles(20))
+    (_, before), _ = page.chart.getViewBox().viewRange()
+
+    page.load_candles(make_candles(40))
+    (_, after), _ = page.chart.getViewBox().viewRange()
+
+    assert after > before
+
+
+def test_the_percentage_names_the_close_it_measured_against(qapp):
+    """Regression: the reference is the last of whatever candles are loaded, which
+    changes with the range. The same $63,012.5 read +0.00% on the 1H view (a 5m
+    close) and -0.06% on the live view (a 4h close, hours old and not even drawn),
+    with nothing on screen to say why."""
+    page = DashboardPage()
+    page.load_candles(make_candles(5), timeframe=Timeframe.M5)
+    page.apply(Snapshot(ready=True, connected=True, mark=63_030.0))
+
+    assert "5m close" in page._pct_label.text()
+
+    page.load_candles(make_candles(5), timeframe=Timeframe.H4)
+    page.apply(Snapshot(ready=True, connected=True, mark=63_030.0))
+
+    assert "4h close" in page._pct_label.text()
+
+
+def test_the_percentage_still_reads_without_a_timeframe(qapp):
+    """load_candles is called without one in tests and by any older caller."""
+    page = DashboardPage()
+    page.load_candles(make_candles(5))
+    page.apply(Snapshot(ready=True, connected=True, mark=63_030.0))
+
+    assert "since last close" in page._pct_label.text()
+
+
+def test_the_line_view_reaches_both_edges_of_the_chart(qapp):
+    """Regression: the x range was -1..len whatever the style. A line is drawn at
+    the indices themselves, so that left a whole empty slot at each end - on the
+    1H view, 12 points inside 13 units, 15% of the width blank. It read as a chart
+    that had been cut off before the current price."""
+    from src.ui.chart import BODY_WIDTH
+
+    page = DashboardPage()
+    page._style_combo.setCurrentIndex(1)  # Line
+    page.load_candles(make_candles(12))
+
+    (x0, x1), _ = page.chart.getViewBox().viewRange()
+    # Points sit at 0..11. Allow only pyqtgraph's 1% padding either side.
+    assert x0 > -0.5, f"dead space on the left: range starts at {x0}"
+    assert x1 < 11.5, f"dead space on the right: range ends at {x1}"
+
+
+def test_the_candle_view_keeps_room_for_the_body(qapp):
+    """The other half: a candle is a body BODY_WIDTH wide centred on its index, so
+    the outermost ones need air or they are clipped by the axis."""
+    from src.ui.chart import BODY_WIDTH
+
+    page = DashboardPage()
+    page.load_candles(make_candles(12))
+
+    (x0, x1), _ = page.chart.getViewBox().viewRange()
+    assert x0 <= -BODY_WIDTH / 2, f"the first candle is clipped: range starts at {x0}"
+    assert x1 >= 11 + BODY_WIDTH / 2, f"the last candle is clipped: range ends at {x1}"
+
+
+def test_a_single_candle_does_not_collapse_the_x_range(qapp):
+    page = DashboardPage()
+    page._style_combo.setCurrentIndex(1)
+    page.load_candles(make_candles(1))
+
+    (x0, x1), _ = page.chart.getViewBox().viewRange()
+    assert x1 > x0
+
+
 def test_chart_windows_trim_the_series(qapp):
     page = DashboardPage()
     page.load_candles(make_candles(200))
