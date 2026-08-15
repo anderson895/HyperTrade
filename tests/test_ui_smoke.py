@@ -1,0 +1,869 @@
+"""Construct and drive the whole window off-screen.
+
+UI crashes almost always happen during construction or on the first update, and both
+are reachable without a display via Qt's offscreen platform.
+"""
+
+import logging
+import os
+
+import pytest
+
+os.environ.setdefault("QT_API", "pyside6")
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+# Qt no longer ships fonts, and the offscreen platform finds none on its own. Its
+# fallback is markedly wider than Segoe UI, so any test that measures a widget
+# against its text would be reading metrics the real app never uses.
+if os.path.isdir(r"C:\Windows\Fonts"):
+    os.environ.setdefault("QT_QPA_FONTDIR", r"C:\Windows\Fonts")
+
+from PySide6.QtWidgets import QApplication  # noqa: E402
+
+from src.broker.base import Fill, FillReason, ManagedPosition  # noqa: E402
+from src.config import AppSettings  # noqa: E402
+from src.core.models import (  # noqa: E402
+    Candle,
+    MarginMode,
+    Position,
+    Side,
+    Timeframe,
+    TradingMode,
+)
+from src.db import connect, get_ui_state, set_ui_state  # noqa: E402
+from src.logging_setup import LogLine  # noqa: E402
+from src.store import record_fill  # noqa: E402
+from src.ui.controller import Snapshot  # noqa: E402
+from src.ui.dashboard_page import DashboardPage  # noqa: E402
+from src.ui.logs_page import LogsPage  # noqa: E402
+from src.ui.main_window import MainWindow  # noqa: E402
+from src.ui.settings_page import SettingsPage  # noqa: E402
+from src.ui.stats_page import StatsPage  # noqa: E402
+from src.ui.trades_page import TradesPage  # noqa: E402
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    return QApplication.instance() or QApplication([])
+
+
+@pytest.fixture
+def conn():
+    connection = connect(":memory:")
+    yield connection
+    connection.close()
+
+
+def make_position(side: Side = Side.LONG) -> ManagedPosition:
+    return ManagedPosition(
+        position=Position(
+            coin="BTC",
+            size=0.05 * side.sign,
+            entry_price=63_000.0,
+            liquidation_price=57_120.0,
+            unrealized_pnl=27.5,
+            margin_used=630.0,
+            leverage=5,
+        ),
+        stop_price=61_880.0,
+        take_profit_price=65_240.0,
+        entry_time_ms=1_700_000_000_000,
+    )
+
+
+def make_candles(count: int = 40) -> list[Candle]:
+    return [
+        Candle(
+            open_time_ms=i * 3_600_000,
+            close_time_ms=(i + 1) * 3_600_000 - 1,
+            open=63_000.0,
+            high=63_100.0,
+            low=62_900.0,
+            close=63_000.0 + i,
+            volume=1.0,
+            trades=1,
+        )
+        for i in range(count)
+    ]
+
+
+def log_line(message: str, levelno: int = logging.INFO) -> LogLine:
+    return LogLine(
+        time="10:00:00",
+        level=logging.getLevelName(levelno),
+        levelno=levelno,
+        message=message,
+        formatted=f"10:00:00  {logging.getLevelName(levelno)}  test  {message}",
+    )
+
+
+# --- settings -------------------------------------------------------------
+
+
+def test_settings_page_builds_without_exploding(qapp):
+    """Regression: change signals fired during load before the state existed."""
+    page = SettingsPage(AppSettings())
+    assert page.current() == AppSettings()
+
+
+def test_settings_round_trip_through_the_widgets(qapp):
+    original = AppSettings(
+        timeframe=Timeframe.M15,
+        risk_usdc=12.5,
+        leverage=7,
+        margin_mode=MarginMode.CROSS,
+        paper_starting_balance=2_500.0,
+        daily_loss_limit_usdc=75.0,
+        economic_data_day_block=True,
+    )
+    page = SettingsPage(AppSettings())
+    page.set_max_leverage(40)
+    page.load(original)
+    assert page.current() == original
+
+
+def test_every_requested_timeframe_is_offered(qapp):
+    """summary.txt asks for all seven; none may quietly go missing."""
+    page = SettingsPage(AppSettings())
+    offered = {page.timeframe.itemData(i) for i in range(page.timeframe.count())}
+    assert offered == set(Timeframe)
+
+
+def test_loss_making_timeframes_are_flagged(qapp):
+    page = SettingsPage(AppSettings())
+    page.load(AppSettings(timeframe=Timeframe.M5))
+    assert page.timeframe_note.isVisibleTo(page)
+    assert "backtested at a loss" in page.timeframe_note.text()
+
+    page.load(AppSettings(timeframe=Timeframe.H4))
+    assert not page.timeframe_note.isVisibleTo(page)
+
+
+def test_live_mode_says_it_is_not_implemented(qapp):
+    page = SettingsPage(AppSettings())
+    page.load(AppSettings(trading_mode=TradingMode.LIVE))
+    assert "not implemented" in page.mode_note.text()
+
+
+def test_valid_settings_are_emitted_on_save(qapp):
+    page = SettingsPage(AppSettings())
+    emitted = []
+    page.saved.connect(emitted.append)
+
+    page.risk.setValue(25.0)
+    page.button_save.click()
+
+    assert len(emitted) == 1
+    assert emitted[0].risk_usdc == 25.0
+
+
+def test_live_mode_cannot_be_saved_without_credentials(qapp):
+    """The only invalid state this form can reach - there is no address field yet."""
+    page = SettingsPage(AppSettings())
+    emitted = []
+    page.saved.connect(emitted.append)
+
+    page.mode.setCurrentIndex(page.mode.findData(TradingMode.LIVE))
+    page.button_save.click()
+
+    assert emitted == []
+    assert page.problem.isVisibleTo(page)
+    assert "wallet address" in page.problem.text()
+
+
+def test_the_form_cannot_produce_invalid_paper_settings(qapp):
+    """Widget ranges carry the validation, so Save never fails in paper mode."""
+    page = SettingsPage(AppSettings())
+    spin_boxes = (page.risk, page.slippage, page.balance, page.daily_loss, page.leverage)
+
+    for widget in spin_boxes:
+        widget.setValue(widget.minimum())
+    assert page.current().validate() == []
+
+    for widget in spin_boxes:
+        widget.setValue(widget.maximum())
+    assert page.current().validate() == []
+
+
+def test_locking_disables_the_form_but_not_the_blackout(qapp):
+    """The news toggle has to keep working while the bot is running."""
+    page = SettingsPage(AppSettings())
+    page.set_enabled(False)
+    assert not page.timeframe.isEnabled()
+    assert not page.button_save.isEnabled()
+    assert page.news_block.isEnabled()
+
+
+# --- dashboard ------------------------------------------------------------
+
+
+def test_dashboard_renders_a_flat_account(qapp):
+    page = DashboardPage()
+    page.apply(Snapshot(ready=True, connected=True, mark=63_000.0, equity=1_000.0))
+
+    assert page.position_card._value.text() == "Flat"
+    assert page.bot_card._value.text() == "STOPPED"
+    assert "63,000" in page._price_label.text()
+
+
+def test_dashboard_renders_an_open_position(qapp):
+    page = DashboardPage()
+    page.apply(
+        Snapshot(
+            ready=True, running=True, connected=True, mark=63_500.0,
+            equity=1_027.5, margin_used=630.0, position=make_position(),
+        )
+    )
+
+    assert "LONG" in page.position_card._value.text()
+    assert "+27.50" in page.position_card._sub.text()
+    assert page.bot_card._value.text() == "RUNNING"
+    assert len(page.chart._level_lines) == 3  # entry, stop, target
+
+
+def test_dashboard_clears_position_levels_when_flat(qapp):
+    page = DashboardPage()
+    page.apply(Snapshot(ready=True, connected=True, mark=63_500.0, position=make_position()))
+    page.apply(Snapshot(ready=True, connected=True, mark=63_500.0))
+    assert page.chart._level_lines == []
+
+
+def test_the_change_is_measured_against_the_last_close(qapp):
+    """Not against the price when the app opened, which reads 0.00% forever."""
+    page = DashboardPage()
+    page.load_candles(make_candles(10))  # last close is 63_009
+    page.apply(Snapshot(ready=True, connected=True, mark=63_009.0 * 1.01))
+
+    assert "+1.00% since last close" in page._pct_label.text()
+
+    page.apply(Snapshot(ready=True, connected=True, mark=63_009.0 * 0.99))
+    assert "-1.00% since last close" in page._pct_label.text()
+
+
+def test_the_change_is_blank_before_any_candles_arrive(qapp):
+    page = DashboardPage()
+    page.apply(Snapshot(ready=True, connected=True, mark=63_000.0))
+    assert page._pct_label.text() == ""
+
+
+def test_dashboard_marks_the_feed_as_down(qapp):
+    page = DashboardPage()
+    page.apply(Snapshot(ready=True, connected=False))
+    assert "No price feed" in page.cards["market"]._sub.text()
+
+
+def test_dashboard_log_panel_keeps_the_newest_first(qapp):
+    page = DashboardPage()
+    page.add_log("first", logging.INFO)
+    page.add_log("second", logging.WARNING)
+    assert "second" in page._log_list.item(0).text()
+    assert "first" in page._log_list.item(1).text()
+
+
+def test_chart_windows_trim_the_series(qapp):
+    page = DashboardPage()
+    page.load_candles(make_candles(200))
+    page.chart.set_window(30)
+    assert len(page.chart.points()) == 30
+    page.chart.set_window(None)
+    assert len(page.chart.points()) == 200
+
+
+# --- the time range selector ----------------------------------------------
+
+
+def test_every_range_is_a_span_of_history(qapp):
+    """Same shape as the reference apps. There is no entry for "the bot's own
+    candles": nothing on this chart is strategy-specific, so such a view would only
+    have meant "4-hour candles" under a name that promised more."""
+    page = DashboardPage()
+    offered = [page._range_combo.itemText(i) for i in range(page._range_combo.count())]
+    assert offered == ["1s", "1H", "4H", "1D", "1W", "1M", "YTD", "All"]
+
+
+def test_the_default_range_is_a_day_and_fetches_immediately(qapp):
+    """Index 0 is the live view, which opens empty — the default must not be it."""
+    page = DashboardPage()
+    assert page._range_combo.currentText() == "1D"
+    assert page.current_request() == (Timeframe.M15, 96)
+
+
+def test_a_stale_saved_range_falls_back_to_the_default(qapp, conn):
+    """"Bot" was removed; a config carrying it must not land on the live view."""
+    set_ui_state(conn, "chart_range", "Bot")
+    page = DashboardPage(conn)
+    assert page._range_combo.currentText() == "1D"
+
+
+def test_a_saved_live_range_still_sets_the_chart_mode(qapp, conn):
+    """It sits at index 0, so setCurrentIndex is a no-op and fires no signal."""
+    set_ui_state(conn, "chart_range", "1s")
+    page = DashboardPage(conn)
+    assert page._range_combo.currentText() == "1s"
+    assert page.chart._mode == "ticks"
+    assert page.current_request() is None
+
+
+def _select(page, label):
+    index = next(
+        i for i in range(page._range_combo.count()) if page._range_combo.itemText(i) == label
+    )
+    page._range_combo.setCurrentIndex(index)
+
+
+# --- the live tick view ---------------------------------------------------
+
+
+def test_the_live_view_draws_the_polled_price(qapp):
+    """Hyperliquid has no 1s candles, so this is the polled price plotted tick by
+    tick - the same thing the reference app's '1s' actually showed."""
+    page = DashboardPage()
+    for price in (63_000.0, 63_010.0, 62_990.0):
+        page.chart.set_mark(price)
+
+    _select(page, "1s")
+
+    assert page.chart.ticks() == [63_000.0, 63_010.0, 62_990.0]
+    assert page.chart._curve.isVisible()
+    assert not page.chart._candlesticks.isVisible()
+    assert len(page.chart._curve.getData()[0]) == 3
+
+
+def test_ticks_are_recorded_even_while_a_candle_view_is_showing(qapp):
+    """So switching to 1s has something to draw instead of an empty chart."""
+    page = DashboardPage()
+    page.load_candles(make_candles(10))
+    page.chart.set_mark(63_000.0)
+    page.chart.set_mark(63_020.0)
+
+    assert page.chart._mode == "candles"
+    assert page.chart.ticks() == [63_000.0, 63_020.0]
+
+
+def test_the_live_view_needs_no_fetch(qapp):
+    page = DashboardPage()
+    requests = []
+    page.chartRangeRequested.connect(lambda tf, count: requests.append((tf, count)))
+
+    _select(page, "1s")
+
+    assert requests == []
+    assert page.current_request() is None
+
+
+def test_the_style_toggle_is_disabled_on_the_live_view(qapp):
+    """A candle built from single samples has no body worth drawing."""
+    page = DashboardPage()
+    _select(page, "1s")
+    assert not page._style_combo.isEnabled()
+
+    _select(page, "1D")
+    assert page._style_combo.isEnabled()
+
+
+def test_the_live_view_says_where_its_data_comes_from(qapp):
+    page = DashboardPage()
+    _select(page, "1s")
+    assert "polled each second" in page._chart_title.text()
+
+
+def test_the_live_view_starts_empty_and_survives_it(qapp):
+    page = DashboardPage()
+    _select(page, "1s")
+    assert page.chart.ticks() == []
+
+
+def test_a_one_dollar_wiggle_does_not_fill_the_live_chart(qapp):
+    """BTC's tick is $1 and the spread is usually exactly that, so a quiet minute
+    moves the mid a tick or two. Scaled to fit, that would read as a crash."""
+    page = DashboardPage()
+    _select(page, "1s")
+    for price in (63_121.5, 63_122.5, 63_121.5, 63_122.5):
+        page.chart.set_mark(price)
+
+    _, (y0, y1) = page.chart.getViewBox().viewRange()
+    assert y1 - y0 > 50  # a $1 move occupies a sliver, not the whole chart
+
+
+def test_a_real_move_still_scales_to_fit(qapp):
+    page = DashboardPage()
+    _select(page, "1s")
+    for price in (62_000.0, 63_000.0, 64_000.0):
+        page.chart.set_mark(price)
+
+    _, (y0, y1) = page.chart.getViewBox().viewRange()
+    assert y0 <= 62_000.0
+    assert y1 >= 64_000.0
+    assert y1 - y0 < 3_000  # zoomed to the move, not padded into irrelevance
+
+
+def test_picking_a_range_asks_for_a_coarser_interval_over_a_longer_span(qapp):
+    """A week of 5m candles would be 2,000 bars of mush."""
+    page = DashboardPage()
+    requests = []
+    page.chartRangeRequested.connect(lambda tf, count: requests.append((tf, count)))
+
+    _select(page, "1H")
+    _select(page, "1W")
+    _select(page, "All")
+
+    assert requests[0] == (Timeframe.M5, 12)
+    assert requests[1] == (Timeframe.H1, 168)
+    assert requests[2] == (Timeframe.W1, 400)
+
+
+def test_ytd_asks_for_as_many_daily_candles_as_the_year_has_run(qapp):
+    page = DashboardPage()
+    requests = []
+    page.chartRangeRequested.connect(lambda tf, count: requests.append((tf, count)))
+
+    _select(page, "YTD")
+
+    timeframe, count = requests[0]
+    assert timeframe is Timeframe.D1
+    assert 2 <= count <= 368
+
+
+def test_switching_to_the_live_view_stops_requesting(qapp):
+    page = DashboardPage()
+    assert page.current_request() is not None
+
+    _select(page, "1s")
+    assert page.current_request() is None
+
+
+def test_the_chart_title_names_the_span_and_the_candles(qapp):
+    """"4H" means four hours of history, not four-hour candles, so the title spells
+    out both rather than leaving the label to be read either way."""
+    page = DashboardPage()
+    _select(page, "1W")
+    assert "1W view" in page._chart_title.text()
+    assert "1 hour candles" in page._chart_title.text()
+
+    _select(page, "4H")
+    assert "4H view" in page._chart_title.text()
+    assert "5 mins candles" in page._chart_title.text()
+
+
+def test_chart_x_range_covers_the_data(qapp):
+    """Regression: the x axis stayed on its empty-plot default once data arrived,
+    so 120 candles were drawn squeezed into a range of -0.5 to 1.5."""
+    page = DashboardPage()
+    page.load_candles(make_candles(200))
+    page.chart.set_window(120)
+
+    (x0, x1), _ = page.chart.getViewBox().viewRange()
+    assert x0 <= 0
+    assert x1 >= 119
+
+
+def test_the_live_price_is_the_moving_tip_of_the_line(qapp):
+    """Closed candles only move once a timeframe, so the tip is what looks alive."""
+    page = DashboardPage()
+    page.load_candles(make_candles(10))
+    page.chart.set_window(None)
+    assert len(page.chart.points()) == 10
+
+    page.chart.set_mark(63_500.0)
+    assert page.chart.points()[-1] == 63_500.0
+    assert len(page.chart.points()) == 11
+
+    page.chart.set_mark(63_600.0)
+    assert page.chart.points()[-1] == 63_600.0
+    assert len(page.chart.points()) == 11  # replaced, not accumulated
+
+
+def test_reloading_the_same_candles_does_not_redraw(qapp):
+    """The UI hands over the whole buffer every second."""
+    page = DashboardPage()
+    candles = make_candles(50)
+    page.load_candles(candles)
+
+    calls = []
+    original = page.chart._redraw
+    page.chart._redraw = lambda: (calls.append(1), original())
+
+    page.load_candles(list(candles))
+    assert calls == []
+
+    page.load_candles(make_candles(51))
+    assert len(calls) == 1
+
+
+# --- the EMA overlay ------------------------------------------------------
+
+
+def test_the_emas_are_drawn_over_the_candles(qapp):
+    page = DashboardPage()
+    page.load_candles(make_candles(80))
+    page.set_strategy_context(Timeframe.H4, {"fast_period": 21, "slow_period": 55})
+
+    assert page.chart._ema_fast.isVisible()
+    assert page.chart._ema_slow.isVisible()
+    # Each skips its own warm-up: no value until it has `period` closes.
+    assert len(page.chart._ema_fast.getData()[0]) == 80 - 21 + 1
+    assert len(page.chart._ema_slow.getData()[0]) == 80 - 55 + 1
+
+
+def test_an_ema_longer_than_the_history_is_not_drawn(qapp):
+    page = DashboardPage()
+    page.load_candles(make_candles(30))
+    page.set_strategy_context(Timeframe.H4, {"fast_period": 21, "slow_period": 55})
+
+    assert page.chart._ema_fast.isVisible()
+    assert not page.chart._ema_slow.isVisible()  # 55 > 30 candles
+
+
+def test_the_legend_says_the_emas_are_the_bots_own_when_the_intervals_match(qapp):
+    page = DashboardPage()
+    _select(page, "1M")  # 1M is drawn with 4-hour candles
+    page.set_strategy_context(Timeframe.H4, {"fast_period": 21, "slow_period": 55})
+
+    assert page._ema_note.isVisibleTo(page)
+    assert "the candles the bot trades" in page._ema_note.text()
+
+
+def test_the_legend_warns_when_the_intervals_differ(qapp):
+    """A 15-minute EMA 21 is a different line from the 4-hour one the strategy
+    crossed. Drawing it without saying so is the claim I got wrong before."""
+    page = DashboardPage()
+    _select(page, "1D")  # drawn with 15-minute candles
+    page.set_strategy_context(Timeframe.H4, {"fast_period": 21, "slow_period": 55})
+
+    assert "not the crossover it acts on" in page._ema_note.text()
+    assert "the bot trades 4 hours" in page._ema_note.text()
+
+
+def test_the_legend_follows_a_change_of_range(qapp):
+    page = DashboardPage()
+    page.set_strategy_context(Timeframe.H4, {"fast_period": 21, "slow_period": 55})
+
+    _select(page, "1M")
+    assert "the candles the bot trades" in page._ema_note.text()
+    _select(page, "1W")
+    assert "not the crossover it acts on" in page._ema_note.text()
+
+
+def test_no_emas_on_the_live_view(qapp):
+    """An EMA of one-second polls is noise, not a trend."""
+    page = DashboardPage()
+    page.load_candles(make_candles(80))
+    page.set_strategy_context(Timeframe.H4, {"fast_period": 21, "slow_period": 55})
+
+    _select(page, "1s")
+
+    assert not page.chart._ema_fast.isVisible()
+    assert not page._ema_note.isVisibleTo(page)
+
+
+def test_a_strategy_without_emas_draws_none(qapp):
+    page = DashboardPage()
+    page.load_candles(make_candles(80))
+    page.set_strategy_context(Timeframe.H4, {"lookback": 10})
+
+    assert not page.chart._ema_fast.isVisible()
+    assert not page._ema_note.isVisibleTo(page)
+
+
+def test_chart_survives_having_no_candles(qapp):
+    """A price with no history has no candle to sit in, so only the mark shows."""
+    page = DashboardPage()
+    page.load_candles([])
+    page.chart.set_mark(63_000.0)
+    assert page.chart.visible_candles() == []
+
+
+# --- candlesticks ---------------------------------------------------------
+
+
+def test_candles_are_the_default_view(qapp):
+    """The stop is 2xATR, and ATR comes from the highs and lows a line chart hides."""
+    page = DashboardPage()
+    assert page._style_combo.currentData() == "candles"
+    assert page.chart._candlesticks.isVisible()
+    assert not page.chart._curve.isVisible()
+
+
+def test_switching_to_the_line_view(qapp):
+    page = DashboardPage()
+    page.load_candles(make_candles(20))
+    page._style_combo.setCurrentIndex(1)
+
+    assert page.chart._curve.isVisible()
+    assert not page.chart._candlesticks.isVisible()
+    assert len(page.chart._curve.getData()[0]) == 20
+
+
+def test_the_forming_candle_is_drawn_after_the_closed_ones(qapp):
+    page = DashboardPage()
+    closed = make_candles(10)
+    forming = Candle(
+        open_time_ms=10 * 3_600_000,
+        close_time_ms=11 * 3_600_000 - 1,
+        open=63_010.0, high=63_050.0, low=62_990.0, close=63_020.0,
+        volume=1.0, trades=1,
+    )
+    page.load_candles(closed, forming)
+    page.chart.set_window(None)
+
+    assert len(page.chart.visible_candles()) == 11
+    assert page.chart.visible_candles()[-1].close == 63_020.0
+
+
+def test_the_live_price_stretches_the_forming_candle(qapp):
+    """Between feed refreshes the mark is what moves the candle being built."""
+    page = DashboardPage()
+    forming = Candle(0, 1, 63_010.0, 63_050.0, 62_990.0, 63_020.0, 1.0, 1)
+    page.load_candles(make_candles(5), forming)
+
+    page.chart.set_mark(63_400.0)  # a new high
+    live = page.chart.visible_candles()[-1]
+    assert live.close == 63_400.0
+    assert live.high == 63_400.0
+    assert live.low == 62_990.0  # untouched
+
+    page.chart.set_mark(62_500.0)  # now a new low
+    live = page.chart.visible_candles()[-1]
+    assert live.low == 62_500.0
+    assert live.close == 62_500.0
+
+
+def test_a_forming_candle_is_opened_from_the_last_close_when_the_feed_has_none(qapp):
+    page = DashboardPage()
+    page.load_candles(make_candles(10))  # last close 63_009
+    page.chart.set_window(None)
+    page.chart.set_mark(63_100.0)
+
+    candles = page.chart.visible_candles()
+    assert len(candles) == 11
+    assert candles[-1].open == 63_009.0
+    assert candles[-1].close == 63_100.0
+
+
+def test_the_price_axis_never_goes_negative(qapp):
+    """Seven years of BTC span $3.8k to $124k, and 6% padding would push it under."""
+    page = DashboardPage()
+    page.load_candles(
+        [
+            Candle(i * 1000, i * 1000 + 999, 4_000.0, 124_000.0, 3_800.0, 120_000.0, 1.0, 1)
+            for i in range(10)
+        ]
+    )
+    _, (y0, _) = page.chart.getViewBox().viewRange()
+    assert y0 >= 0
+
+
+def test_the_y_range_covers_the_wicks(qapp):
+    """A line chart only needs the closes; candles must not clip their highs."""
+    page = DashboardPage()
+    page.load_candles(make_candles(30))
+    page.chart.set_window(None)
+
+    highs = [candle.high for candle in page.chart.visible_candles()]
+    lows = [candle.low for candle in page.chart.visible_candles()]
+    _, (y0, y1) = page.chart.getViewBox().viewRange()
+    assert y0 <= min(lows)
+    assert y1 >= max(highs)
+
+
+# --- trades, stats, logs --------------------------------------------------
+
+
+def test_trades_page_handles_an_empty_history(qapp, conn):
+    page = TradesPage(conn)
+    page.reload(TradingMode.PAPER)
+    assert page.table.rowCount() == 0
+    assert "0 closed" in page.summary.text()
+
+
+def test_trades_page_lists_recorded_fills(qapp, conn):
+    record_fill(
+        conn, TradingMode.PAPER,
+        Fill(1_700_000_000_000, "BTC", Side.LONG, 0.05, 63_000.0, 0.14, FillReason.ENTRY),
+    )
+    record_fill(
+        conn, TradingMode.PAPER,
+        Fill(
+            1_700_000_100_000, "BTC", Side.LONG, 0.05, 65_000.0, 0.15,
+            FillReason.TAKE_PROFIT, realised_pnl=99.7,
+        ),
+    )
+
+    page = TradesPage(conn)
+    page.reload(TradingMode.PAPER)
+
+    assert page.table.rowCount() == 2
+    assert page.table.item(0, 3).text() == "take profit"  # newest first
+    assert "+99.70" in page.table.item(0, 7).text()
+    assert "1 closed" in page.summary.text()
+
+
+def test_stats_page_summarises_closed_trades(qapp, conn):
+    record_fill(
+        conn, TradingMode.PAPER,
+        Fill(
+            1_700_000_100_000, "BTC", Side.LONG, 0.05, 65_000.0, 0.15,
+            FillReason.TAKE_PROFIT, realised_pnl=99.7,
+        ),
+    )
+    page = StatsPage(conn)
+    page.refresh(TradingMode.PAPER)
+
+    assert "Closed Trades: 1" in page._labels["Closed Trades"].text()
+    assert "Win Rate: 100%" in page._labels["Win Rate"].text()
+    assert "+99.70" in page._labels["Total PnL"].text()
+
+
+def test_logs_page_prepends_and_colours(qapp):
+    page = LogsPage()
+    page.add_log(log_line("candle closed"))
+    page.add_log(log_line("trade rejected", logging.WARNING))
+
+    assert page.table.rowCount() == 2
+    assert page.table.item(0, 2).text() == "trade rejected"
+    assert page.table.item(1, 2).text() == "candle closed"
+
+
+# --- the whole window -----------------------------------------------------
+
+
+def test_window_builds_and_shows_every_page(qapp, conn):
+    """Constructing must need no event loop and no network."""
+    window = MainWindow(conn, AppSettings())
+    assert window._stack.count() == len(MainWindow.PAGES)
+
+    for index in range(len(MainWindow.PAGES)):
+        window._nav.setCurrentRow(index)
+        assert window._stack.currentIndex() == index
+
+
+def test_bottom_bar_reflects_the_settings(qapp, conn):
+    window = MainWindow(conn, AppSettings(risk_usdc=12.5, leverage=3, timeframe=Timeframe.H1))
+    assert window.bottom.timeframe_label.text() == "1 hour"
+    assert window.bottom.risk_label.text() == "12.50 USDC"
+    assert window.bottom.leverage_label.text() == "3x"
+    assert "PAPER" in window.bottom.market_label.text()
+
+
+def test_run_controls_follow_the_snapshot(qapp, conn):
+    window = MainWindow(conn, AppSettings())
+
+    window._on_update(Snapshot(ready=True, running=False))
+    assert window.bottom.start_btn.isEnabled()
+    assert not window.bottom.stop_btn.isEnabled()
+    assert not window.bottom.close_btn.isEnabled()
+
+    window._on_update(Snapshot(ready=True, running=True, position=make_position()))
+    assert not window.bottom.start_btn.isEnabled()
+    assert window.bottom.stop_btn.isEnabled()
+    assert window.bottom.close_btn.isEnabled()
+    assert not window.settings_page.button_save.isEnabled()  # locked while running
+
+
+def test_the_settings_buttons_are_not_squashed(qapp, conn):
+    """Regression: a form taller than its scroll area was compressed rather than
+    scrolled, crushing the buttons from 35px to 19px and clipping their labels."""
+    window = MainWindow(conn, AppSettings())
+    window.resize(window.minimumWidth(), window.minimumHeight())
+    window.show()
+    window._nav.setCurrentRow(1)
+    qapp.processEvents()
+
+    page = window.settings_page
+    for button in (page.button_save, page.button_reset):
+        assert button.height() >= button.sizeHint().height(), button.text()
+
+
+def test_the_bottom_bar_fits_at_the_smallest_allowed_window(qapp, conn):
+    """Four labelled columns, three buttons and an uptime counter have to fit, or
+    the market label clips to "BTC-USD perp [PA"."""
+    window = MainWindow(conn, AppSettings())
+    window.show()
+    qapp.processEvents()
+
+    needed = window.bottom.sizeHint().width()
+    available = window.minimumWidth() - window._sidebar.width() - 24  # content margins
+    assert needed <= available, f"bottom bar wants {needed}px, has {available}px"
+
+
+def test_errors_raise_the_alert_banner(qapp, conn):
+    window = MainWindow(conn, AppSettings())
+    assert not window.alert.isVisibleTo(window)
+
+    window._on_log(log_line("could not reach Hyperliquid", logging.ERROR))
+    assert window.alert.isVisibleTo(window)
+
+    window.alert.dismiss()
+    assert not window.alert.isVisibleTo(window)
+
+
+def test_sidebar_collapse_is_remembered(qapp, conn):
+    window = MainWindow(conn, AppSettings())
+    assert window._sidebar.width() == 204
+
+    window._toggle_sidebar()
+    assert window._sidebar.width() == 62
+    assert window._nav.item(0).text() == ""
+    assert get_ui_state(conn, "sidebar_collapsed") == "1"
+
+    # A fresh window restores the collapsed state.
+    assert MainWindow(conn, AppSettings())._sidebar.width() == 62
+
+
+def test_the_window_opens_maximised_by_default(qapp, conn):
+    """The dashboard puts a chart, a log column and five cards side by side."""
+    assert get_ui_state(conn, "window_maximized", "1") == "1"
+
+
+def test_closing_remembers_whether_it_was_maximised(qapp, conn):
+    window = MainWindow(conn, AppSettings())
+    window.showNormal()
+    window.close()
+    assert get_ui_state(conn, "window_maximized") == "0"
+
+
+async def test_a_restored_chart_range_is_loaded_at_startup(qapp, conn):
+    """Regression: the saved range emitted its fetch request while DashboardPage was
+    still being constructed, before MainWindow had connected to the signal. Nothing
+    was listening, nothing was fetched, and the chart sat empty."""
+    set_ui_state(conn, "chart_range", "1W")
+    window = MainWindow(conn, AppSettings())
+
+    assert window.dash.chart.visible_candles() == []  # nothing fetched yet
+
+    fetched = []
+
+    async def fake_fetch(timeframe, count):
+        fetched.append((timeframe, count))
+        return make_candles(20)
+
+    window.controller.fetch_chart_candles = fake_fetch
+    await window._load_chart_range(*window.dash.current_request())
+
+    assert fetched == [(Timeframe.H1, 168)]
+    assert len(window.dash.chart.visible_candles()) == 20
+
+
+async def test_startup_asks_for_the_restored_range(qapp, conn):
+    """The window must ask again once it is wired, or the chart never fills."""
+    set_ui_state(conn, "chart_range", "1D")
+    window = MainWindow(conn, AppSettings())
+
+    async def no_connection():
+        return False
+
+    window.controller.initialise = no_connection
+    asked = []
+    window._refresh_chart_range = lambda: asked.append(True)
+
+    await window._start_up()
+
+    assert asked == [True]
+
+
+def test_ui_state_does_not_leak_into_settings(qapp, conn):
+    """`ui.` keys share the settings table; loading settings must ignore them."""
+    from src.config import load_settings
+
+    window = MainWindow(conn, AppSettings())
+    window._toggle_sidebar()
+    assert load_settings(conn) == AppSettings()

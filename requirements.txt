@@ -1,0 +1,31 @@
+# HyperTrade — BTC/USD trading bot on Hyperliquid
+# Python 3.13 (same interpreter as PolyTradeMonitoring)
+
+# --- UI ---
+PySide6>=6.6
+qasync>=0.27            # bridges the Qt event loop with asyncio
+pyqtgraph>=0.13         # real-time line chart
+qtawesome>=1.4          # icons
+
+# --- Networking / data ---
+httpx>=0.27             # async REST (/info, /exchange)
+websockets>=12.0        # wss://api.hyperliquid.xyz/ws
+truststore>=0.9         # TLS via the native Windows certificate store
+
+# --- Hyperliquid ---
+hyperliquid-python-sdk>=0.9   # official SDK: Info, Exchange, order signing
+eth-account>=0.13             # LocalAccount used to sign as the API wallet
+
+# --- Storage / secrets ---
+keyring>=24.0           # agent private key -> Windows Credential Manager
+
+# --- Charting (lazy-loaded when the Candles view is opened) ---
+finplot>=1.9
+pandas>=2.2
+
+# --- Time ---
+tzdata>=2024.1          # zoneinfo on Windows
+
+# --- Dev ---
+pytest>=8.0
+pytest-asyncio>=0.23
