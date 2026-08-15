@@ -42,32 +42,38 @@ from . import theme
 from .about_page import AboutPage
 from .alert_banner import AlertBanner
 from .bottom_bar import BottomBar
+from .chrome import PageHeader, StatusBar, TopBar, divider
 from .controller import BotController, Snapshot
 from .dashboard_page import DashboardPage
 from .logs_page import LogsPage
 from .settings_page import SettingsPage
 from .stats_page import StatsPage
 from .trades_page import TradesPage
-from .widgets import WheelBlocker
+from .widgets import Card, WheelBlocker
 
 log = logging.getLogger(__name__)
 
 REFRESH_MS = 1_000
 CHART_REFRESH_MS = 20_000
-SIDEBAR_WIDE, SIDEBAR_NARROW = 204, 62
-NAV_WIDE, NAV_NARROW = 190, 48
+# Wide enough for the 34px bolt plus the 23px wordmark on one line; below this the
+# wordmark elides to "HyperTra...".
+SIDEBAR_WIDE, SIDEBAR_NARROW = 222, 62
+NAV_WIDE, NAV_NARROW = 208, 48
 
-PAGE_TRADES, PAGE_STATS = 3, 4
+PAGE_SETTINGS, PAGE_TRADES, PAGE_STATS, PAGE_ABOUT = 1, 3, 4, 5
 
 
 class MainWindow(QMainWindow):
+    #: nav icon, sidebar label, top-bar icon, top-bar title, breadcrumb.
+    #: The top bar names the page rather than the nav item — "Bot Settings", not
+    #: "Settings" — and carries its own icon, as in the reference design.
     PAGES = [
-        ("fa6s.house", "Dashboard"),
-        ("fa6s.gear", "Settings"),
-        ("fa6s.file-lines", "Logs"),
-        ("fa6s.chart-line", "Trades"),
-        ("fa6s.chart-pie", "Statistics"),
-        ("fa6s.circle-info", "About"),
+        ("fa6s.house", "Dashboard", "fa6s.gauge-high", "Live Dashboard", "Market Overview"),
+        ("fa6s.gear", "Settings", "fa6s.robot", "Bot Settings", "Account Configuration"),
+        ("fa6s.file-lines", "Logs", "fa6s.file-lines", "Event Log", "Recent Activity"),
+        ("fa6s.chart-line", "Trades", "fa6s.chart-line", "Trade History", "Fills and Results"),
+        ("fa6s.chart-pie", "Statistics", "fa6s.chart-pie", "Statistics", "Performance"),
+        ("fa6s.circle-info", "About", "fa6s.circle-info", "About HyperTrade", "Version and Strategy"),
     ]
 
     def __init__(self, conn: sqlite3.Connection, settings: AppSettings) -> None:
@@ -94,6 +100,9 @@ class MainWindow(QMainWindow):
         add_ui_sink(self._on_log)
         self._build_timers()
         self._refresh_config_labels()
+        # Set by hand: the nav starts on row 0, so selecting it fires no signal and
+        # the breadcrumb would read "Dashboard /" with nothing after the slash.
+        self.top.set_page(*self.PAGES[0][2:])
 
     def start(self) -> None:
         """Begin polling and connect to the exchange.
@@ -103,36 +112,74 @@ class MainWindow(QMainWindow):
         """
         self._refresh_timer.start(REFRESH_MS)
         self._chart_timer.start(CHART_REFRESH_MS)
-        asyncio.ensure_future(self._start_up())
+        self._schedule(self._start_up)
+
+    def _schedule(self, coroutine, *args) -> None:
+        """Run a coroutine on the shared loop, or drop it if there is none.
+
+        The window is deliberately constructible without a loop — that is what makes
+        it testable off-screen — and some of these are triggered by rendering rather
+        than by a click. Checked before the coroutine is built, so none is left
+        un-awaited.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = loop.create_task(coroutine(*args))
+        task.add_done_callback(self._report_failure)
+
+    @staticmethod
+    def _report_failure(task: asyncio.Task) -> None:
+        """Surface a crash inside a fire-and-forget task.
+
+        Without this, an exception during start-up vanishes into the task and the
+        window simply comes up connected to nothing, with an empty log and no clue.
+        """
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is None:
+            return
+
+        # KeyboardInterrupt and SystemExit are not Exceptions, and they are not
+        # failures either — they are someone asking the app to stop. `task.exception()`
+        # hands them over all the same. Logged and swallowed, Ctrl+C left the loop
+        # running, the window open and the process to be killed by hand; `run_gui`'s
+        # `finally: conn.close()` never ran, the SQLite WAL was orphaned, and every
+        # saved setting went with it.
+        if not isinstance(error, Exception):
+            log.info("shutting down on %s", type(error).__name__)
+            QApplication.instance().quit()
+            return
+
+        log.error("background task failed: %s", error, exc_info=error)
 
     # --- construction ----------------------------------------------------
 
     def _build_sidebar(self) -> QWidget:
         self._brand_icon = QLabel()
-        self._brand_icon.setPixmap(qta.icon("fa6s.bolt", color=theme.ACCENT).pixmap(28, 28))
+        self._brand_icon.setPixmap(qta.icon("fa6s.bolt", color=theme.BRAND).pixmap(34, 34))
         self._brand = QLabel("HyperTrade")
-        self._brand.setProperty("h2", True)
-
-        self._sidebar_btn = QToolButton()
-        self._sidebar_btn.setIcon(qta.icon("fa6s.bars", color=theme.MUTED))
-        self._sidebar_btn.setIconSize(QSize(18, 18))
-        self._sidebar_btn.setToolTip("Toggle sidebar")
-        self._sidebar_btn.clicked.connect(self._toggle_sidebar)
+        self._brand.setStyleSheet(
+            f"color: {theme.TEXT}; font-size: 23px; font-weight: bold; font-style: italic"
+        )
 
         brand_row = QHBoxLayout()
         brand_row.setSpacing(8)
         brand_row.addWidget(self._brand_icon)
         brand_row.addWidget(self._brand, stretch=1)
-        brand_row.addWidget(self._sidebar_btn)
 
-        self._brand_sub = QLabel("BTC/USD perpetual")
-        self._brand_sub.setProperty("muted", True)
+        self._brand_sub = QLabel("HYPERLIQUID TRADING BOT")
+        self._brand_sub.setStyleSheet(f"color: {theme.MUTED}; font-size: 9px; letter-spacing: 1px")
+        # Centred, so it sits under the wordmark rather than under the bolt.
+        self._brand_sub.setAlignment(Qt.AlignmentFlag.AlignHCenter)
 
         self._nav = QListWidget()
         self._nav.setObjectName("sidebar")
         self._nav.setIconSize(QSize(18, 18))
         self._nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
-        for icon_name, label in self.PAGES:
+        for icon_name, label, *_rest in self.PAGES:
             icon = qta.icon(icon_name, color=theme.MUTED, color_selected=theme.ACCENT_TEXT)
             item = QListWidgetItem(icon, label)
             item.setToolTip(label)
@@ -143,13 +190,25 @@ class MainWindow(QMainWindow):
         self._version = QLabel(f"v{__version__}")
         self._version.setProperty("muted", True)
 
+        self._promo = Card()
+        promo_column = QVBoxLayout(self._promo)
+        promo_column.setContentsMargins(12, 10, 12, 10)
+        promo_column.setSpacing(2)
+        tagline = QLabel("Trade Smarter.\nAutomate Better.")
+        tagline.setStyleSheet(f"color: {theme.ACCENT}; font-weight: bold; background: transparent")
+        product = QLabel("HyperTrade Bot")
+        product.setStyleSheet(f"color: {theme.MUTED}; background: transparent")
+        promo_column.addWidget(tagline)
+        promo_column.addWidget(product)
+
         self._sidebar = QWidget()
         column = QVBoxLayout(self._sidebar)
-        column.setContentsMargins(14, 14, 0, 14)
+        column.setContentsMargins(14, 14, 10, 14)
         column.addLayout(brand_row)
         column.addWidget(self._brand_sub)
         column.addSpacing(14)
         column.addWidget(self._nav, stretch=1)
+        column.addWidget(self._promo)
         column.addWidget(self._version)
         self._sidebar.setFixedWidth(SIDEBAR_WIDE)
 
@@ -165,25 +224,47 @@ class MainWindow(QMainWindow):
         self.trades = TradesPage(conn)
         self.stats = StatsPage(conn)
 
+        self.about = AboutPage()
+
         self._stack = QStackedWidget()
         for page in (self.dash, self.settings_page, self.logs, self.trades,
-                     self.stats, AboutPage()):
+                     self.stats, self.about):
             self._stack.addWidget(page)
 
     def _build_body(self, sidebar: QWidget) -> QWidget:
         self.bottom = BottomBar()
         self.alert = AlertBanner()
+        self.top = TopBar()
+        self.status = StatusBar()
+        self.top.toggle_btn.clicked.connect(self._toggle_sidebar)
+
+        inner = QVBoxLayout()
+        inner.setContentsMargins(14, 12, 14, 12)
+        inner.setSpacing(10)
+        inner.addWidget(self.alert)
+        inner.addWidget(self._stack, stretch=1)
+        inner.addWidget(self.bottom)
 
         content = QVBoxLayout()
-        content.setContentsMargins(10, 14, 14, 14)
-        content.addWidget(self.alert)
-        content.addWidget(self._stack, stretch=1)
-        content.addWidget(self.bottom)
+        content.setContentsMargins(0, 0, 0, 0)
+        content.setSpacing(0)
+        content.addWidget(self.top)
+        content.addLayout(inner, stretch=1)
 
-        root = QHBoxLayout()
+        body = QHBoxLayout()
+        body.setContentsMargins(0, 0, 0, 0)
+        body.addWidget(sidebar)
+        # The sidebar and the top bar share a background, so without this rule the
+        # seam between them disappears and the wordmark floats in the top bar.
+        body.addWidget(divider())
+        body.addLayout(content, stretch=1)
+
+        # The status strip runs the full width, under the sidebar too.
+        root = QVBoxLayout()
         root.setContentsMargins(0, 0, 0, 0)
-        root.addWidget(sidebar)
-        root.addLayout(content, stretch=1)
+        root.setSpacing(0)
+        root.addLayout(body, stretch=1)
+        root.addWidget(self.status)
 
         container = QWidget()
         container.setLayout(root)
@@ -192,7 +273,7 @@ class MainWindow(QMainWindow):
     def _build_timers(self) -> None:
         self._refresh_timer = QTimer(self)
         self._refresh_timer.timeout.connect(
-            lambda: asyncio.ensure_future(self.controller.refresh())
+            lambda: self._schedule(self.controller.refresh)
         )
         # A custom chart range is not fed by the engine's buffer, so it needs its own
         # refresh - slower, because a week of hourly candles does not change often.
@@ -202,6 +283,12 @@ class MainWindow(QMainWindow):
         self._uptime_timer = QTimer(self)
         self._uptime_timer.setInterval(1_000)
         self._uptime_timer.timeout.connect(self._tick_uptime)
+
+        self._clock_timer = QTimer(self)
+        self._clock_timer.setInterval(1_000)
+        self._clock_timer.timeout.connect(self.status.tick_clock)
+        self._clock_timer.start()
+        self.status.tick_clock()
 
     def _connect(self) -> None:
         self.controller.updated.connect(self._on_update)
@@ -223,6 +310,9 @@ class MainWindow(QMainWindow):
         )
         self.settings_page.resetPaper.connect(
             lambda: asyncio.ensure_future(self.controller.reset_paper())
+        )
+        self.settings_page.previewRequested.connect(
+            lambda: self._schedule(self._refresh_preview)
         )
         self.dash.chartRangeRequested.connect(
             lambda timeframe, count: asyncio.ensure_future(
@@ -268,9 +358,10 @@ class MainWindow(QMainWindow):
 
     def _apply_sidebar(self, collapsed: bool) -> None:
         """Collapsed is icon-only with tooltips; the body takes the freed width."""
-        for widget in (self._brand_icon, self._brand, self._brand_sub, self._version):
+        for widget in (self._brand_icon, self._brand, self._brand_sub,
+                       self._version, self._promo):
             widget.setVisible(not collapsed)
-        for index, (_icon, label) in enumerate(self.PAGES):
+        for index, (_icon, label, *_rest) in enumerate(self.PAGES):
             self._nav.item(index).setText("" if collapsed else label)
         self._nav.setFixedWidth(NAV_NARROW if collapsed else NAV_WIDE)
         self._sidebar.setFixedWidth(SIDEBAR_NARROW if collapsed else SIDEBAR_WIDE)
@@ -293,17 +384,34 @@ class MainWindow(QMainWindow):
         # price keeps stretching it between fetches.
         self.dash.load_candles(candles[:-1], candles[-1])
 
+    async def _refresh_preview(self) -> None:
+        """Re-size a hypothetical trade under whatever is on the Settings form.
+
+        Sized from Settings, shown on About: the form is where the numbers are typed,
+        the About card is where you read what they would actually produce.
+        """
+        try:
+            preview = await self.controller.preview(self.settings_page.current())
+        except FEED_ERRORS as exc:
+            log.debug("could not build the settings preview: %s", exc)
+            return
+        self.about.show_preview(preview)
+
     def _refresh_chart_range(self) -> None:
         """Keep a custom range current; the bot view refreshes with the engine."""
         request = self.dash.current_request()
         if request is not None:
-            asyncio.ensure_future(self._load_chart_range(*request))
+            self._schedule(self._load_chart_range, *request)
 
     # --- slots -----------------------------------------------------------
 
     def _on_page_changed(self, index: int) -> None:
         self._stack.setCurrentIndex(index)
-        if index == PAGE_TRADES:
+        _nav_icon, _label, icon, title, crumb = self.PAGES[index]
+        self.top.set_page(icon, title, crumb)
+        if index == PAGE_ABOUT:
+            self._schedule(self._refresh_preview)
+        elif index == PAGE_TRADES:
             self.trades.reload(self._snapshot.mode)
         elif index == PAGE_STATS:
             self.stats.refresh(self._snapshot.mode)
@@ -336,6 +444,19 @@ class MainWindow(QMainWindow):
             self.trades.reload(snapshot.mode)
             self.stats.refresh(snapshot.mode)
 
+        self.top.connection.set_state(
+            snapshot.connected,
+            "Connected to Hyperliquid" if snapshot.connected else "Disconnected",
+        )
+        self.status.set_state(snapshot.running, snapshot.ready)
+        self.status.set_network(
+            self.controller.settings.network.value.capitalize(),
+            snapshot.mode.value.upper(),
+        )
+
+        if self._stack.currentIndex() == PAGE_ABOUT:
+            self._schedule(self._refresh_preview)
+
         if snapshot.error:
             self.alert.show_error(snapshot.error)
 
@@ -345,9 +466,6 @@ class MainWindow(QMainWindow):
 
     def _refresh_config_labels(self) -> None:
         settings = self.controller.settings
-        self.dash.set_strategy_context(
-            settings.timeframe, self.controller.strategy_parameters()
-        )
         self.bottom.show_config(
             market=f"BTC-USD perp [{settings.trading_mode.value.upper()}]",
             timeframe=settings.timeframe.label,
@@ -375,6 +493,7 @@ class MainWindow(QMainWindow):
         self._refresh_timer.stop()
         self._chart_timer.stop()
         self._uptime_timer.stop()
+        self._clock_timer.stop()
         set_ui_state(self._conn, "window_maximized", "1" if self.isMaximized() else "0")
 
         try:

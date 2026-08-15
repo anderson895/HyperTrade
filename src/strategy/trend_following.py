@@ -87,6 +87,12 @@ class TrendFollowing(Strategy):
             "trend_filter_period": self.trend_filter_period,
         }
 
+    def typical_stop_distance(self, candles: Sequence[Candle]) -> float | None:
+        if len(candles) <= self.atr_period:
+            return None
+        current = atr(candles, self.atr_period)[-1]
+        return current * self.atr_stop_multiple if current else None
+
     def evaluate(self, candles: Sequence[Candle]) -> Signal | None:
         # Indicators are recomputed over the whole window on every closed candle.
         # That is O(n) per evaluation at most once per 5 minutes — far cheaper than

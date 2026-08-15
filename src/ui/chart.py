@@ -19,7 +19,6 @@ import pyqtgraph as pg
 from PySide6.QtCore import QRectF, Qt
 from PySide6.QtGui import QFont, QPainter, QPicture
 
-from ..core.indicators import ema
 from ..core.models import Candle
 from . import theme
 
@@ -112,10 +111,6 @@ class PriceChart(pg.PlotWidget):
         self._curve = self.plot(pen=pg.mkPen(theme.ACCENT, width=2))
         self._curve.hide()
 
-        self._ema_fast = self.plot(pen=pg.mkPen(theme.EMA_FAST, width=1.5))
-        self._ema_slow = self.plot(pen=pg.mkPen(theme.EMA_SLOW, width=1.5))
-        self._ema_periods: tuple[int | None, int | None] = (None, None)
-
         self._mark = pg.InfiniteLine(
             angle=0, pen=pg.mkPen(theme.MUTED, width=1, style=Qt.PenStyle.DashLine)
         )
@@ -180,16 +175,6 @@ class PriceChart(pg.PlotWidget):
     def set_style(self, style: str) -> None:
         """`candles` or `line`."""
         self._style = style
-        self._redraw()
-
-    def set_emas(self, fast: int | None, slow: int | None) -> None:
-        """Moving-average periods to overlay, or `None` to draw none.
-
-        Computed from the candles on screen, which are the bot's own only when the
-        chart's interval matches the timeframe it trades. The dashboard says so
-        beside the chart; the drawing itself makes no such claim.
-        """
-        self._ema_periods = (fast, slow)
         self._redraw()
 
     def set_window(self, candles: int | None) -> None:
@@ -274,7 +259,6 @@ class PriceChart(pg.PlotWidget):
             return
 
         candles = self.visible_candles()
-        self._draw_emas([candle.close for candle in candles])
 
         if self._style == "candles":
             self._curve.hide()
@@ -298,30 +282,7 @@ class PriceChart(pg.PlotWidget):
         span += self._levels
         self._apply_y_range(span)
 
-    def _draw_emas(self, closes: list[float]) -> None:
-        """Overlay the two moving averages, skipping their warm-up.
-
-        `ema` returns None until it has `period` closes, and those leading gaps are
-        dropped rather than plotted as zeroes — a line diving to the axis and back
-        would read as a crash.
-        """
-        for curve, period in zip(
-            (self._ema_fast, self._ema_slow), self._ema_periods, strict=True
-        ):
-            if not period or len(closes) < period:
-                curve.setData([], [])
-                curve.hide()
-                continue
-            values = ema(closes, period)
-            points = [(x, value) for x, value in enumerate(values) if value is not None]
-            curve.setData([x for x, _ in points], [v for _, v in points])
-            curve.show()
-
     def _draw_ticks(self) -> None:
-        # An EMA of one-second polls is noise, not a trend.
-        self._ema_fast.hide()
-        self._ema_slow.hide()
-
         """The live price line, one point per poll.
 
         Always a line: a candle built from single samples has no meaningful body,

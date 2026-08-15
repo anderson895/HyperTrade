@@ -51,7 +51,10 @@ def run_gui(verbose: bool = False) -> int:
             window.showMaximized()
         else:
             window.show()
-        window.start()
+        # Queued rather than called: start() schedules coroutines, and there is no
+        # running loop until run_forever below. Called here directly, every one of
+        # them would be dropped and the app would come up connected to nothing.
+        loop.call_soon(window.start)
         with loop:
             loop.run_forever()
     finally:

@@ -15,6 +15,7 @@ from typing import Any, get_type_hints
 from .core.models import MarginMode, Network, Timeframe, TradingMode
 
 ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
+PRIVATE_KEY_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 
 #: Timeframes that backtested at a clear loss for the shipped strategy
 #: (−0.905R and −0.395R per trade; see the evidence table in SKILL.md). They stay
@@ -79,7 +80,17 @@ class AppSettings:
             problems.append("News blackout minutes cannot be negative.")
 
         if self.is_live:
-            if not ADDRESS_RE.match(self.account_address):
+            if PRIVATE_KEY_RE.match(self.account_address or ""):
+                # This field is persisted to SQLite in plain text. A key must never
+                # reach it, and the two are easy to confuse when they arrive in the
+                # same note.
+                problems.append(
+                    "That is a private key, not a wallet address. Never paste a "
+                    "private key here - this field is saved to disk in plain text. "
+                    "The address is 42 characters; the key goes in the API Wallet "
+                    "field below, which stores it in Windows Credential Manager."
+                )
+            elif not ADDRESS_RE.match(self.account_address):
                 problems.append(
                     "Live mode needs your main wallet address (0x + 40 hex characters)."
                 )

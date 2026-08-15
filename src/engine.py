@@ -15,14 +15,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import sqlite3
 import time
 from datetime import datetime, timezone
 
 from .broker.base import Broker, Fill
 from .config import AppSettings
-from .core.models import AssetMeta, Candle, TradingMode
-from .core.sizing import PositionPlan, Rejection, plan_position
+from .core.models import AssetMeta, Candle, Side, TradingMode
+from .core.sizing import (
+    PositionPlan,
+    RejectReason,
+    Rejection,
+    minimum_leverage_for,
+    plan_position,
+)
 from .data.hl_info import HyperliquidInfo
 from .errors import TRADING_ERRORS
 from .store import realised_since
@@ -180,6 +187,49 @@ class BotEngine:
             self.settings.margin_mode.value, self.strategy.name,
             self.strategy.parameters(),
         )
+        await self.check_settings_can_trade()
+
+    async def check_settings_can_trade(self) -> str | None:
+        """Warn if the risk, leverage and timeframe can never produce a trade.
+
+        Sizing comes from the stop distance, so a wide stop needs a large position,
+        and that position may need more margin than the leverage allows. Every entry
+        is then rejected — correctly, but a bot that rejects everything looks exactly
+        like a market that never signals. This says so up front, and says what to
+        change. Returns the warning, or None when a trade would fit.
+        """
+        distance = self.strategy.typical_stop_distance(self._candles)
+        if not distance or not self._candles:
+            return None
+
+        entry = self._candles[-1].close
+        account = await self.broker.account_state()
+        plan = plan_position(
+            side=Side.LONG,
+            entry_price=entry,
+            stop_price=entry - distance,
+            risk_usdc=self.settings.risk_usdc,
+            equity_usdc=account.account_value,
+            leverage=self.settings.leverage,
+            asset=self.asset,
+        )
+        if not isinstance(plan, Rejection):
+            return None
+
+        message = (
+            f"these settings cannot trade right now: {plan}. "
+            f"Stop distance is about {distance:,.0f} on {self.settings.timeframe.label}"
+        )
+        if plan.reason is RejectReason.EXCEEDS_LEVERAGE_CAP and account.account_value > 0:
+            needed = minimum_leverage_for(
+                self.settings.risk_usdc, distance, entry, account.account_value
+            )
+            message += (
+                f" - raise leverage to {needed}x, or lower the risk to about "
+                f"{self.settings.risk_usdc * self.settings.leverage / needed:,.2f} USDC"
+            )
+        log.warning("%s", message)
+        return message
 
     # --- the loop --------------------------------------------------------
 

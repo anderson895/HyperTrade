@@ -4,6 +4,7 @@ UI crashes almost always happen during construction or on the first update, and 
 are reachable without a display via Qt's offscreen platform.
 """
 
+import asyncio
 import logging
 import os
 
@@ -33,6 +34,8 @@ from src.db import connect, get_ui_state, set_ui_state  # noqa: E402
 from src.logging_setup import LogLine  # noqa: E402
 from src.store import record_fill  # noqa: E402
 from src.ui.controller import Snapshot  # noqa: E402
+from src.ui import main_window  # noqa: E402
+from src.ui.about_page import AboutPage  # noqa: E402
 from src.ui.dashboard_page import DashboardPage  # noqa: E402
 from src.ui.logs_page import LogsPage  # noqa: E402
 from src.ui.main_window import MainWindow  # noqa: E402
@@ -84,6 +87,9 @@ def make_candles(count: int = 40) -> list[Candle]:
         )
         for i in range(count)
     ]
+
+
+LIVE_ADDRESS = "0x5eA3e82B3605201d09b349789feD24E30D76c41b"
 
 
 def log_line(message: str, levelno: int = logging.INFO) -> LogLine:
@@ -138,10 +144,127 @@ def test_loss_making_timeframes_are_flagged(qapp):
     assert not page.timeframe_note.isVisibleTo(page)
 
 
-def test_live_mode_says_it_is_not_implemented(qapp):
+def test_live_mode_warns_that_it_spends_real_money(qapp):
     page = SettingsPage(AppSettings())
     page.load(AppSettings(trading_mode=TradingMode.LIVE))
-    assert "not implemented" in page.mode_note.text()
+    assert "REAL MONEY" in page.mode_note.text()
+
+
+def test_the_credential_fields_appear_only_in_live_mode(qapp):
+    """A key field on screen in Paper mode invites pasting a key nothing needs."""
+    page = SettingsPage(AppSettings())
+    assert not page.address.isVisibleTo(page)
+    assert not page.agent_key.isVisibleTo(page)
+
+    page.load(AppSettings(trading_mode=TradingMode.LIVE))
+    assert page.address.isVisibleTo(page)
+    assert page.agent_key.isVisibleTo(page)
+
+
+def test_no_note_on_the_settings_page_is_clipped(qapp):
+    """Regression: a wrapped label can always shrink in a layout's eyes, so when the
+    form was taller than its scroll area the notes were what got squeezed. One lost
+    its final sentence, a single pixel short of fitting."""
+    from PySide6.QtWidgets import QLabel
+
+    page = SettingsPage(AppSettings())
+    page.load(AppSettings(trading_mode=TradingMode.LIVE))
+    page.resize(700, 900)  # deliberately shorter than the form
+    page.show()
+    qapp.processEvents()
+
+    for label in page.findChildren(QLabel):
+        if not label.wordWrap() or not label.text() or label.width() <= 0:
+            continue
+        needed = label.heightForWidth(label.width())
+        if needed > 0:
+            assert label.height() >= needed, label.text()[:60]
+
+
+# --- the preview card -----------------------------------------------------
+#
+# It lives on the About page, not Settings: it is reference material, read once to
+# understand what a risk and leverage pair produces, not on every edit to the form.
+
+
+def preview_values(page) -> dict:
+    card = page.preview_card
+    return {key: card._values[key].text() for key, _ in card.ROWS}
+
+
+def test_the_preview_starts_empty_rather_than_blank(qapp):
+    """Drawn as if waiting, so the card never looks broken before prices arrive."""
+    page = AboutPage()
+    assert set(preview_values(page).values()) == {"-"}
+    assert "Waiting" in page.preview_card.verdict.text()
+
+
+def test_the_preview_shows_what_a_trade_would_be(qapp):
+    from src.ui.controller import Preview
+
+    page = AboutPage()
+    page.show_preview(
+        Preview(
+            price=63_037.0, equity=99.72, stop_distance=847.0,
+            size=0.00236, notional=149.0, margin=30.0,
+        )
+    )
+
+    values = preview_values(page)
+    assert values["price"] == "63,037.0"
+    assert values["equity"] == "99.72 USDC"
+    assert values["size"] == "0.00236 BTC"
+    assert values["margin"] == "30 USDC"
+    assert "can trade" in page.preview_card.verdict.text()
+
+
+def test_the_preview_names_settings_that_cannot_trade(qapp):
+    """The exact trap this card exists for: 5 USDC at 2x on a 99 USDC account needs
+    373 USDC of notional and gets 198, so every entry is rejected in silence."""
+    from src.ui.controller import Preview
+
+    page = AboutPage()
+    page.show_preview(
+        Preview(
+            price=63_037.0, equity=99.72, stop_distance=847.0,
+            problem="exceeds leverage cap", hint="needs 4x, or risk of about 2.50 USDC",
+        )
+    )
+
+    assert preview_values(page)["size"] == "-"  # there is no trade to describe
+    verdict = page.preview_card.verdict.text()
+    assert "Cannot trade" in verdict
+    assert "needs 4x" in verdict
+
+
+def test_changing_risk_or_leverage_asks_for_a_new_preview(qapp):
+    page = SettingsPage(AppSettings())
+    asked = []
+    page.previewRequested.connect(lambda: asked.append(True))
+
+    page.risk.setValue(25.0)
+    page.leverage.setValue(7)
+    page.timeframe.setCurrentIndex(0)
+
+    assert len(asked) == 3
+
+
+def test_the_agent_key_is_masked(qapp):
+    page = SettingsPage(AppSettings())
+    assert page.agent_key.echoMode() == page.agent_key.EchoMode.Password
+
+
+def test_the_address_round_trips_but_the_key_never_enters_the_settings(qapp):
+    """The settings object is written to SQLite in plain text; a key must not ride
+    along in it."""
+    page = SettingsPage(AppSettings())
+    page.load(AppSettings(trading_mode=TradingMode.LIVE, account_address=LIVE_ADDRESS))
+    page.agent_key.setText("0x" + "ab" * 32)
+
+    settings = page.current()
+
+    assert settings.account_address == LIVE_ADDRESS
+    assert "ab" * 32 not in repr(settings)
 
 
 def test_valid_settings_are_emitted_on_save(qapp):
@@ -154,6 +277,21 @@ def test_valid_settings_are_emitted_on_save(qapp):
 
     assert len(emitted) == 1
     assert emitted[0].risk_usdc == 25.0
+
+
+def test_every_problem_is_reported_at_once(qapp):
+    """Regression: the key error returned early and hid the address error behind it,
+    so a swapped pair took three attempts to sort out - fix one, meet the next."""
+    page = SettingsPage(AppSettings())
+    page.load(AppSettings(trading_mode=TradingMode.LIVE))
+
+    page.address.setText("0x" + "ab" * 32)  # a key in the address field
+    page.agent_key.setText(LIVE_ADDRESS)  # an address in the key field
+    page.button_save.click()
+
+    reported = page.problem.text()
+    assert "is a wallet address, not a private key" in reported
+    assert "is a private key, not a wallet address" in reported
 
 
 def test_live_mode_cannot_be_saved_without_credentials(qapp):
@@ -489,81 +627,6 @@ def test_reloading_the_same_candles_does_not_redraw(qapp):
     assert len(calls) == 1
 
 
-# --- the EMA overlay ------------------------------------------------------
-
-
-def test_the_emas_are_drawn_over_the_candles(qapp):
-    page = DashboardPage()
-    page.load_candles(make_candles(80))
-    page.set_strategy_context(Timeframe.H4, {"fast_period": 21, "slow_period": 55})
-
-    assert page.chart._ema_fast.isVisible()
-    assert page.chart._ema_slow.isVisible()
-    # Each skips its own warm-up: no value until it has `period` closes.
-    assert len(page.chart._ema_fast.getData()[0]) == 80 - 21 + 1
-    assert len(page.chart._ema_slow.getData()[0]) == 80 - 55 + 1
-
-
-def test_an_ema_longer_than_the_history_is_not_drawn(qapp):
-    page = DashboardPage()
-    page.load_candles(make_candles(30))
-    page.set_strategy_context(Timeframe.H4, {"fast_period": 21, "slow_period": 55})
-
-    assert page.chart._ema_fast.isVisible()
-    assert not page.chart._ema_slow.isVisible()  # 55 > 30 candles
-
-
-def test_the_legend_says_the_emas_are_the_bots_own_when_the_intervals_match(qapp):
-    page = DashboardPage()
-    _select(page, "1M")  # 1M is drawn with 4-hour candles
-    page.set_strategy_context(Timeframe.H4, {"fast_period": 21, "slow_period": 55})
-
-    assert page._ema_note.isVisibleTo(page)
-    assert "the candles the bot trades" in page._ema_note.text()
-
-
-def test_the_legend_warns_when_the_intervals_differ(qapp):
-    """A 15-minute EMA 21 is a different line from the 4-hour one the strategy
-    crossed. Drawing it without saying so is the claim I got wrong before."""
-    page = DashboardPage()
-    _select(page, "1D")  # drawn with 15-minute candles
-    page.set_strategy_context(Timeframe.H4, {"fast_period": 21, "slow_period": 55})
-
-    assert "not the crossover it acts on" in page._ema_note.text()
-    assert "the bot trades 4 hours" in page._ema_note.text()
-
-
-def test_the_legend_follows_a_change_of_range(qapp):
-    page = DashboardPage()
-    page.set_strategy_context(Timeframe.H4, {"fast_period": 21, "slow_period": 55})
-
-    _select(page, "1M")
-    assert "the candles the bot trades" in page._ema_note.text()
-    _select(page, "1W")
-    assert "not the crossover it acts on" in page._ema_note.text()
-
-
-def test_no_emas_on_the_live_view(qapp):
-    """An EMA of one-second polls is noise, not a trend."""
-    page = DashboardPage()
-    page.load_candles(make_candles(80))
-    page.set_strategy_context(Timeframe.H4, {"fast_period": 21, "slow_period": 55})
-
-    _select(page, "1s")
-
-    assert not page.chart._ema_fast.isVisible()
-    assert not page._ema_note.isVisibleTo(page)
-
-
-def test_a_strategy_without_emas_draws_none(qapp):
-    page = DashboardPage()
-    page.load_candles(make_candles(80))
-    page.set_strategy_context(Timeframe.H4, {"lookback": 10})
-
-    assert not page.chart._ema_fast.isVisible()
-    assert not page._ema_note.isVisibleTo(page)
-
-
 def test_chart_survives_having_no_candles(qapp):
     """A price with no history has no candle to sit in, so only the mark shows."""
     page = DashboardPage()
@@ -736,6 +799,32 @@ def test_window_builds_and_shows_every_page(qapp, conn):
         assert window._stack.currentIndex() == index
 
 
+def test_the_breadcrumb_names_the_page_from_the_start(qapp, conn):
+    """The nav opens on row 0, which fires no signal - so it is set by hand, or the
+    bar reads "Dashboard /" with nothing after the slash."""
+    window = MainWindow(conn, AppSettings())
+    assert window.top._title.text() == "Live Dashboard"
+    assert window.top._crumb.text() == "Market Overview"
+
+    # The top bar names the page, not the nav item.
+    window._nav.setCurrentRow(1)
+    assert window._nav.item(1).text() == "Settings"
+    assert window.top._title.text() == "Bot Settings"
+    assert window.top._crumb.text() == "Account Configuration"
+
+
+def test_the_status_bar_follows_the_snapshot(qapp, conn):
+    window = MainWindow(conn, AppSettings())
+
+    window._on_update(Snapshot(ready=True, connected=True, running=True))
+    assert "Running" in window.status._state.text()
+    assert "Connected" in window.top.connection._label.text()
+
+    window._on_update(Snapshot(ready=False, connected=False))
+    assert "Not connected" in window.status._state.text()
+    assert "Disconnected" in window.top.connection._label.text()
+
+
 def test_bottom_bar_reflects_the_settings(qapp, conn):
     window = MainWindow(conn, AppSettings(risk_usdc=12.5, leverage=3, timeframe=Timeframe.H1))
     assert window.bottom.timeframe_label.text() == "1 hour"
@@ -785,6 +874,127 @@ def test_the_bottom_bar_fits_at_the_smallest_allowed_window(qapp, conn):
     assert needed <= available, f"bottom bar wants {needed}px, has {available}px"
 
 
+async def test_start_actually_schedules_the_startup(qapp, conn):
+    """Regression: start() was called before the loop was running, so the coroutine
+    it scheduled was silently dropped and the app came up connected to nothing -
+    empty log, disabled START, no clue why."""
+    window = MainWindow(conn, AppSettings())
+    ran = []
+
+    async def fake_start_up():
+        ran.append(True)
+
+    window._start_up = fake_start_up
+    window.start()
+    await asyncio.sleep(0)  # let the task run
+
+    assert ran == [True]
+    assert window._refresh_timer.isActive()
+
+
+async def test_the_preview_reaches_the_card_that_actually_shows_it(qapp, conn):
+    """Regression: the preview card moved from Settings to About, and the window went
+    on calling `settings_page.show_preview`. Every page test passed - each page was
+    fine on its own - while the running app logged an AttributeError once a second."""
+    from src.ui.controller import Preview
+
+    window = MainWindow(conn, AppSettings())
+
+    async def fake_preview(_settings):
+        return Preview(
+            price=63_050.0, equity=99.72, stop_distance=804.6,
+            size=0.00311, notional=195.92, margin=39.18,
+        )
+
+    window.controller.preview = fake_preview
+    await window._refresh_preview()
+
+    assert window.about.preview_card._values["size"].text() == "0.00311 BTC"
+    assert "can trade" in window.about.preview_card.verdict.text()
+
+
+def test_opening_about_refreshes_the_preview(qapp, conn):
+    """The card is on About, so that is the page whose arrival must re-size it."""
+    window = MainWindow(conn, AppSettings())
+    scheduled = []
+    window._schedule = lambda coro, *args: scheduled.append(coro)
+
+    window._nav.setCurrentRow(main_window.PAGE_ABOUT)
+
+    assert window._refresh_preview in scheduled
+
+
+async def test_a_crash_in_a_scheduled_task_is_logged(qapp, conn, caplog):
+    """A fire-and-forget task that raises must not vanish."""
+    window = MainWindow(conn, AppSettings())
+
+    async def explode():
+        raise RuntimeError("something broke")
+
+    with caplog.at_level(logging.ERROR):
+        window._schedule(explode)
+        # The task has to finish and its done-callback has to be dispatched, which
+        # is a further turn of the loop.
+        await asyncio.sleep(0.05)
+
+    assert "something broke" in caplog.text
+
+
+class _StubTask:
+    """Stands in for a finished asyncio.Task that ended on `error`."""
+
+    def __init__(self, error):
+        self._error = error
+
+    def cancelled(self) -> bool:
+        return False
+
+    def exception(self):
+        return self._error
+
+
+def test_ctrl_c_stops_the_app_instead_of_being_logged(caplog, monkeypatch):
+    """Regression: KeyboardInterrupt is not an Exception, but `task.exception()`
+    returns it anyway. Reported as "background task failed" it was swallowed, the
+    loop kept running, and the process had to be killed - which skipped
+    `conn.close()`, orphaned the SQLite WAL, and lost every saved setting.
+
+    Raising it inside a real task would abort the test run itself, so the handler is
+    called with a stand-in for the task that carries one."""
+    quit_calls = []
+    monkeypatch.setattr(
+        main_window,
+        "QApplication",
+        type("StubApp", (), {"instance": staticmethod(
+            lambda: type("App", (), {"quit": lambda self: quit_calls.append(True)})()
+        )}),
+    )
+
+    with caplog.at_level(logging.ERROR):
+        MainWindow._report_failure(_StubTask(KeyboardInterrupt()))
+
+    assert quit_calls == [True]
+    assert "background task failed" not in caplog.text
+
+
+def test_an_ordinary_failure_is_still_reported_and_does_not_quit(caplog, monkeypatch):
+    """The other half: a real bug must not be mistaken for someone pressing Ctrl+C."""
+    quit_calls = []
+    monkeypatch.setattr(
+        main_window,
+        "QApplication",
+        type("StubApp", (), {"instance": staticmethod(
+            lambda: type("App", (), {"quit": lambda self: quit_calls.append(True)})()
+        )}),
+    )
+
+    with caplog.at_level(logging.ERROR):
+        MainWindow._report_failure(_StubTask(RuntimeError("something broke")))
+
+    assert quit_calls == []
+    assert "something broke" in caplog.text
+
+
 def test_errors_raise_the_alert_banner(qapp, conn):
     window = MainWindow(conn, AppSettings())
     assert not window.alert.isVisibleTo(window)
@@ -798,15 +1008,15 @@ def test_errors_raise_the_alert_banner(qapp, conn):
 
 def test_sidebar_collapse_is_remembered(qapp, conn):
     window = MainWindow(conn, AppSettings())
-    assert window._sidebar.width() == 204
+    assert window._sidebar.width() == main_window.SIDEBAR_WIDE
 
     window._toggle_sidebar()
-    assert window._sidebar.width() == 62
+    assert window._sidebar.width() == main_window.SIDEBAR_NARROW
     assert window._nav.item(0).text() == ""
     assert get_ui_state(conn, "sidebar_collapsed") == "1"
 
     # A fresh window restores the collapsed state.
-    assert MainWindow(conn, AppSettings())._sidebar.width() == 62
+    assert MainWindow(conn, AppSettings())._sidebar.width() == main_window.SIDEBAR_NARROW
 
 
 def test_the_window_opens_maximised_by_default(qapp, conn):

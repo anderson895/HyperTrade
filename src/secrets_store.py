@@ -21,6 +21,7 @@ SERVICE_NAME = "HyperTrade"
 AGENT_KEY_ENTRY = "agent_private_key"
 
 PRIVATE_KEY_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
+ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 
 
 def normalise_private_key(raw: str) -> str:
@@ -34,6 +35,14 @@ def normalise_private_key(raw: str) -> str:
         raise ValueError("No private key was entered.")
     if not candidate.startswith("0x"):
         candidate = "0x" + candidate
+
+    if ADDRESS_RE.match(candidate):
+        # Approving an API wallet shows both its address and its key, and the two
+        # get copied in the wrong order often enough to name the mistake.
+        raise ValueError(
+            "That is a wallet address, not a private key. Approving an API wallet "
+            "shows both - the key is the longer one, 64 characters."
+        )
     if not PRIVATE_KEY_RE.match(candidate):
         raise ValueError(
             "That does not look like a private key. Expected 64 hexadecimal "

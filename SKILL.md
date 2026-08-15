@@ -101,7 +101,25 @@ liquidation price, so in a continuous move the stop always comes first. A gap pa
 recorded as a larger-than-possible loss rather than as a liquidation.
 
 **Live mode must fail closed.** If key loading, agent approval, or the first balance read fails:
-show the red error banner, fall back to Paper, and do not place anything.
+show the red error banner, fall back to Paper, and do not place anything. Implemented in
+`session.Session._build_broker`; a half-configured live broker is worse than none, because nothing
+has been ordered yet and this way nothing will be.
+
+**Live order shapes** — `src/broker/live.py`:
+
+| | |
+|---|---|
+| Entry | IOC limit priced through the book by the slippage allowance |
+| Stop | reduce-only **market** trigger — getting out beats getting a price |
+| Target | reduce-only **limit** trigger at exactly the target, matching the backtest's assumption |
+| Both exits | one `bulk_orders` call under `positionTpsl` grouping, so the exchange cancels one when the other fills. Sent separately, a leftover trigger could later open a new position |
+
+Reads (account, fills, resting orders) go through the project's own async httpx client, because
+they are polled every second and blocking the Qt loop each time would freeze the window. Writes go
+through the official SDK — order signing is not something to reimplement — on a worker thread.
+
+The exchange owns the truth: the broker caches what it opened only so a later fill can be named
+stop or target by order id. A close it did not order is recorded as `manual close`, not guessed at.
 
 ---
 

@@ -130,6 +130,50 @@ async def test_prepare_refuses_when_history_is_too_short(conn):
         await engine.prepare()
 
 
+class AtrStrategy(StubStrategy):
+    """A strategy that reports a stop distance, like the real one does."""
+
+    def __init__(self, distance: float, signal=None):
+        super().__init__(signal)
+        self.distance = distance
+
+    def typical_stop_distance(self, candles):
+        return self.distance
+
+
+async def test_settings_that_can_never_trade_are_flagged_at_start(conn):
+    """Found the hard way: 5 USDC of risk at 2x on a 99 USDC account needs 373 USDC
+    of notional and gets 198. Every entry is rejected, and a bot that rejects
+    everything looks exactly like a market that never signals."""
+    engine, _, broker = build(conn, risk_usdc=5.0, leverage=2)
+    engine.strategy = AtrStrategy(distance=845.0)
+    broker.reset(99.72)
+    await engine.load_history()
+
+    warning = await engine.check_settings_can_trade()
+
+    assert warning is not None
+    assert "exceeds_leverage_cap" in warning
+    assert "raise leverage to 4x" in warning
+    assert "lower the risk to about 2.50 USDC" in warning
+
+
+async def test_settings_that_fit_produce_no_warning(conn):
+    engine, _, broker = build(conn, risk_usdc=2.0, leverage=5)
+    engine.strategy = AtrStrategy(distance=845.0)
+    broker.reset(99.72)
+    await engine.load_history()
+
+    assert await engine.check_settings_can_trade() is None
+
+
+async def test_the_check_is_skipped_when_the_strategy_will_not_say(conn):
+    """A strategy that cannot report a stop distance is not guessed at."""
+    engine, _, _ = build(conn)
+    await engine.load_history()
+    assert await engine.check_settings_can_trade() is None
+
+
 async def test_history_loads_without_starting_the_bot(conn):
     """The chart must have candles from the moment the window opens."""
     engine, _, _ = build(conn)

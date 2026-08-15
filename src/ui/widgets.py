@@ -3,10 +3,24 @@
 from __future__ import annotations
 
 import qtawesome as qta
-from PySide6.QtCore import QEvent, QObject
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QVBoxLayout
+from PySide6.QtCore import QEvent, QObject, Qt
+from PySide6.QtWidgets import (
+    QFrame,
+    QGridLayout,
+    QHBoxLayout,
+    QLabel,
+    QVBoxLayout,
+    QWidget,
+)
 
 from . import theme
+
+#: Cards share the width equally and grow with the window; this is the narrowest
+#: each may become. Fixed widths left a third card hanging off the edge of a 1672
+#: window and a wasted strip on a 1920 one.
+MIN_CARD_WIDTH = 420
+#: The narrowest a note can be: the card's minimum, less its margins and border.
+NOTE_WIDTH = MIN_CARD_WIDTH - 38
 
 
 class WheelBlocker(QObject):
@@ -97,6 +111,137 @@ class StatCard(Card):
     def set_sub(self, text: str) -> None:
         self._sub.setText(text)
         self._sub.setVisible(bool(text))
+
+
+def wrapped_label(text: str = "") -> QLabel:
+    """A word-wrapped label whose full height its layout will actually honour.
+
+    QLabel can work out how tall it needs to be for a given width, but a layout only
+    asks when the size policy says to. Without that flag the label is allocated its
+    one-line size hint and the last line is quietly clipped — which cost one note its
+    final sentence, one pixel short of fitting.
+    """
+    label = QLabel(text)
+    label.setWordWrap(True)
+    policy = label.sizePolicy()
+    policy.setHeightForWidth(True)
+    label.setSizePolicy(policy)
+    return label
+
+
+def note_label(text: str = "", width: int = NOTE_WIDTH) -> QLabel:
+    """A muted, wrapped note that will not be squeezed out of its last line.
+
+    The height is reserved for the narrowest the card can be. Any wider and the text
+    wraps into fewer lines, which fits inside the space already set aside — so the
+    label can grow with the card without ever being clipped.
+    """
+    note = wrapped_label(text)
+    note.setProperty("muted", True)
+    note.ensurePolished()  # or the metrics come from the unstyled font
+    note.setMinimumHeight(
+        note.fontMetrics()
+        .boundingRect(0, 0, width, 0, Qt.TextFlag.TextWordWrap, text)
+        .height()
+    )
+    return note
+
+
+def note_box(title: str, body: str) -> QFrame:
+    """The tinted callout from the reference design."""
+    box = QFrame()
+    box.setProperty("notebox", True)
+
+    icon = QLabel()
+    icon.setPixmap(qta.icon("fa6s.circle-info", color=theme.ACCENT).pixmap(14, 14))
+    icon.setStyleSheet("background: transparent")
+    heading = QLabel(title)
+    heading.setStyleSheet(f"color: {theme.ACCENT}; font-weight: bold; background: transparent")
+
+    head = QHBoxLayout()
+    head.setSpacing(6)
+    head.addWidget(icon)
+    head.addWidget(heading)
+    head.addStretch()
+
+    text = note_label(body, NOTE_WIDTH - 24)
+    text.setStyleSheet(f"color: {theme.ACCENT_TEXT}; background: transparent")
+
+    column = QVBoxLayout(box)
+    column.setContentsMargins(12, 10, 12, 10)
+    column.setSpacing(4)
+    column.addLayout(head)
+    column.addWidget(text)
+    return box
+
+
+class TitledCard(Card):
+    """A card headed by an icon and a title, holding fields in one or two columns."""
+
+    def __init__(self, icon: str, title: str) -> None:
+        super().__init__()
+        self.setMinimumWidth(MIN_CARD_WIDTH)
+
+        badge = QLabel()
+        badge.setPixmap(qta.icon(icon, color=theme.ACCENT).pixmap(18, 18))
+        badge.setStyleSheet("background: transparent")
+        heading = QLabel(title)
+        heading.setProperty("h3", True)
+        heading.setStyleSheet("background: transparent")
+
+        head = QHBoxLayout()
+        head.setSpacing(8)
+        head.addWidget(badge)
+        head.addWidget(heading)
+        head.addStretch()
+
+        self._column = QVBoxLayout(self)
+        self._column.setContentsMargins(18, 16, 18, 18)
+        self._column.setSpacing(6)
+        self._column.addLayout(head)
+        self._column.addSpacing(8)
+
+        self._grid: QGridLayout | None = None
+        self._row = 0
+
+    # --- single column ---------------------------------------------------
+
+    def field(self, label: str, widget: QWidget) -> QLabel:
+        caption = QLabel(label)
+        caption.setProperty("muted", True)
+        caption.setContentsMargins(0, 8, 0, 0)
+        self._column.addWidget(caption)
+        self._column.addWidget(widget)
+        return caption
+
+    def note(self, text: str = "") -> QLabel:
+        note = note_label(text)
+        self._column.addWidget(note)
+        return note
+
+    def add(self, widget: QWidget) -> None:
+        self._column.addWidget(widget)
+
+    def finish(self) -> None:
+        self._column.addStretch()
+
+    # --- two columns -----------------------------------------------------
+
+    def start_grid(self) -> None:
+        self._grid = QGridLayout()
+        self._grid.setHorizontalSpacing(14)
+        self._grid.setVerticalSpacing(4)
+        self._column.addLayout(self._grid)
+        self._row = 0
+
+    def grid_field(self, label: str, widget: QWidget, column: int, span: int = 1) -> None:
+        caption = QLabel(label)
+        caption.setProperty("muted", True)
+        caption.setContentsMargins(0, 8, 0, 0)
+        self._grid.addWidget(caption, self._row, column, 1, span)
+        self._grid.addWidget(widget, self._row + 1, column, 1, span)
+        if column == 1 or span == 2:
+            self._row += 2
 
 
 def labelled_column(title: str, value: str) -> tuple[QVBoxLayout, QLabel]:

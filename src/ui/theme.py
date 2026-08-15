@@ -6,25 +6,28 @@ PolyTrade is indigo on navy; HyperTrade is teal on charcoal, which matches
 Hyperliquid's own mint accent and makes the two apps obvious at a glance.
 """
 
-# Palette
-BG = "#0c1116"
-CARD = "#141b22"
-BORDER = "#1e2831"
-INPUT_BG = "#0f161d"
+# Palette, sampled from the reference mockup rather than guessed at.
+BG = "#050913"
+CARD = "#0A101D"
+BORDER = "#1A2032"
+INPUT_BG = "#080C16"
 TEXT = "#e6edf3"
-MUTED = "#8b98a5"
-ACCENT = "#2dd4bf"
-ACCENT_DIM = "#0d3b36"
-ACCENT_TEXT = "#a7f3e4"
-GREEN = "#22c55e"
+MUTED = "#7d8aa0"
+ACCENT = "#01DE7D"
+#: The top bar runs a cyan-to-green ramp: the wordmark's bolt is the cyan end,
+#: the page icon and title a mint in the middle, and only state indicators use
+#: the full ACCENT green. Sampled off the mockup's glyph cores, not guessed.
+BRAND = "#04DEC6"
+BRAND_MINT = "#0EDEB3"
+ACCENT_DIM = "#0a2e21"
+ACCENT_TEXT = "#7df0b8"
+GREEN = "#01DE7D"
 RED = "#ef4444"
+#: Body text inside a red callout. Full RED on a tinted panel vibrates against it.
+RED_TEXT = "#f8b4b4"
+RED_DIM = "#2a1216"
 AMBER = "#f59e0b"
 BTC_ORANGE = "#f7931a"
-
-# Moving averages. Kept clear of the candle greens and reds and of the accent, so a
-# crossing reads at a glance rather than blending into the bars behind it.
-EMA_FAST = "#fbbf24"
-EMA_SLOW = "#a78bfa"
 
 STYLESHEET = f"""
 QMainWindow, QWidget {{
@@ -42,8 +45,38 @@ QLabel[accent="true"] {{ color: {ACCENT}; font-weight: bold; font-size: 14px; }}
 QFrame[card="true"] {{
     background: {CARD};
     border: 1px solid {BORDER};
+    border-radius: 12px;
+}}
+/* The top bar sits level with the page it heads rather than above it — the bottom
+   border is what separates them. Lifting it to CARD made the bar read as a floating
+   panel, which the reference design does not do. */
+QFrame[topbar="true"] {{
+    background: {BG};
+    border: none;
+    border-bottom: 1px solid {BORDER};
+}}
+QFrame[statusbar="true"] {{
+    background: {INPUT_BG};
+    border: none;
+    border-top: 1px solid {BORDER};
+}}
+QFrame[pill="true"] {{
+    background: {ACCENT_DIM};
+    border: 1px solid {ACCENT};
+    border-radius: 12px;
+}}
+QFrame[notebox="true"] {{
+    background: {ACCENT_DIM};
+    border: 1px solid {ACCENT};
     border-radius: 8px;
 }}
+QFrame[errorbox="true"] {{
+    background: {RED_DIM};
+    border: 1px solid {RED};
+    border-radius: 8px;
+}}
+QLabel[h3="true"] {{ font-size: 15px; font-weight: bold; }}
+QLabel[pagetitle="true"] {{ font-size: 24px; font-weight: bold; }}
 
 QListWidget#sidebar {{
     background: {BG};
@@ -82,8 +115,19 @@ QPushButton {{
 }}
 QPushButton:hover {{ background: #2a3a46; }}
 QPushButton:disabled {{ color: #5b6b78; }}
+QPushButton#accentBtn {{
+    background: {ACCENT}; color: #04140c;
+    font-weight: bold;
+    border: none;
+    border-radius: 6px;
+    padding: 8px 16px;
+    min-height: 18px;
+}}
+QPushButton#accentBtn:hover {{ background: #2ef094; }}
+QPushButton#accentBtn:disabled {{ background: {ACCENT_DIM}; color: #4a5568; }}
+
 QPushButton#startBtn {{
-    background: #15a06f; color: white;
+    background: {ACCENT}; color: #04140c;
     font-weight: bold; font-size: 15px; padding: 10px 18px;
     border: none;
     border-radius: 6px;

@@ -92,10 +92,6 @@ class DashboardPage(QWidget):
     def __init__(self, conn: sqlite3.Connection | None = None) -> None:
         super().__init__()
         self._conn = conn
-        # Set before any widget is built: restoring the saved range below fires the
-        # range handler, which already asks about the moving averages.
-        self._bot_timeframe: Timeframe | None = None
-        self._ema_periods: tuple[int | None, int | None] = (None, None)
 
         # ---- Status cards row -------------------------------------------
         self.cards = {
@@ -120,9 +116,6 @@ class DashboardPage(QWidget):
         # ---- Chart panel --------------------------------------------------
         self._chart_title = QLabel("BTC-USD Perpetual (Hyperliquid)")
         self._chart_title.setProperty("accent", True)
-        self._ema_note = QLabel()
-        self._ema_note.setTextFormat(Qt.TextFormat.RichText)
-        self._ema_note.setVisible(False)
         self._price_label = QLabel("$ -")
         self._price_label.setProperty("h1", True)
         self._pct_label = QLabel("")
@@ -186,7 +179,6 @@ class DashboardPage(QWidget):
         chart_col = QVBoxLayout(chart_panel)
         chart_col.setContentsMargins(14, 12, 14, 12)
         chart_col.addWidget(self._chart_title)
-        chart_col.addWidget(self._ema_note)
         chart_col.addLayout(price_row)
         chart_col.addWidget(self.chart, stretch=1)
         chart_col.addWidget(self._strategy_label)
@@ -274,44 +266,6 @@ class DashboardPage(QWidget):
 
     # --- the time range selector -----------------------------------------
 
-    def set_strategy_context(self, timeframe: Timeframe, parameters: dict) -> None:
-        """Which timeframe the bot trades, and the moving averages it uses.
-
-        Both are needed for the legend, because the EMAs are computed from the
-        candles on screen. On a 15-minute view they are EMAs of 15-minute closes —
-        a different line from the one the strategy crossed, and the note says so
-        rather than letting the chart imply otherwise.
-        """
-        self._bot_timeframe = timeframe
-        self._ema_periods = (parameters.get("fast_period"), parameters.get("slow_period"))
-        self.chart.set_emas(*self._ema_periods)
-        self._refresh_ema_note()
-
-    def _refresh_ema_note(self) -> None:
-        fast, slow = self._ema_periods
-        if not fast or not slow or self._range.live:
-            self._ema_note.setVisible(False)
-            return
-
-        shown = self._range.timeframe
-        if self._bot_timeframe is not None and shown is self._bot_timeframe:
-            tail = f"on {shown.label} - the candles the bot trades"
-            colour = theme.MUTED
-        else:
-            traded = self._bot_timeframe.label if self._bot_timeframe else "another timeframe"
-            tail = (
-                f"on {shown.label} - the bot trades {traded}, "
-                f"so this is not the crossover it acts on"
-            )
-            colour = theme.AMBER
-
-        self._ema_note.setText(
-            f'<span style="color:{theme.EMA_FAST}">&#9473; EMA {fast}</span>'
-            f'&nbsp;&nbsp;<span style="color:{theme.EMA_SLOW}">&#9473; EMA {slow}</span>'
-            f'&nbsp;&nbsp;<span style="color:{colour}">{tail}</span>'
-        )
-        self._ema_note.setVisible(True)
-
     def current_request(self) -> tuple[Timeframe, int] | None:
         """The interval and count to fetch, or None for the live view, which is
         drawn from the polled price and fetches nothing."""
@@ -335,7 +289,6 @@ class DashboardPage(QWidget):
                 f"({self._range.timeframe.label} candles)"
             )
         self._chart_title.setText(title)
-        self._refresh_ema_note()  # the interval on screen just changed
 
         if self._conn is not None:
             set_ui_state(self._conn, "chart_range", self._range.label)

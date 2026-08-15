@@ -36,6 +36,18 @@ class Strategy(ABC):
         """Current settings, for the log line written when the bot starts."""
         return {}
 
+    def typical_stop_distance(self, candles: Sequence[Candle]) -> float | None:
+        """Roughly how far this strategy's stop would sit from entry, right now.
+
+        Used before the bot starts, to check the risk and leverage settings can
+        actually produce a trade. Without it, settings that can never fit look
+        exactly like a market that never signals: silence.
+
+        Returns None when the strategy cannot say, in which case the check is
+        skipped rather than guessed at.
+        """
+        return None
+
 
 _REGISTRY: dict[str, type[Strategy]] = {}
 

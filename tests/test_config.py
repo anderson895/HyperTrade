@@ -95,6 +95,18 @@ def test_live_mode_requires_an_address_and_a_key():
     assert any("agent" in problem for problem in problems)
 
 
+def test_a_private_key_in_the_address_field_is_named_for_what_it_is():
+    """This field is persisted to SQLite in plain text, so a key must never reach
+    it. The two get swapped when they arrive in the same note."""
+    settings = AppSettings(
+        trading_mode=TradingMode.LIVE, account_address="0x" + "ab" * 32
+    )
+    problems = settings.validate(has_agent_key=True)
+
+    assert any("is a private key, not a wallet address" in problem for problem in problems)
+    assert any("saved to disk in plain text" in problem for problem in problems)
+
+
 def test_live_mode_rejects_a_malformed_address():
     settings = AppSettings(trading_mode=TradingMode.LIVE, account_address="0xnope")
     assert any("wallet address" in problem for problem in settings.validate(has_agent_key=True))

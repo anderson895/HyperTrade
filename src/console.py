@@ -83,14 +83,17 @@ async def run(args: argparse.Namespace) -> int:
                 log.error("%s", problem)
             return 1
 
-        if settings.is_live:
-            log.error("Live trading is not implemented yet. Switch Trading Mode back to Paper.")
-            return 1
-
         # Same assembly the desktop app uses, so the two cannot drift apart.
         session = await open_session(conn, settings, poll_seconds=args.poll)
         broker, engine = session.broker, session.engine
         try:
+            if session.fell_back_to_paper:
+                log.error(
+                    "Live mode refused, running in PAPER instead: %s",
+                    session.fell_back_to_paper,
+                )
+            elif settings.is_live:
+                log.warning("LIVE MODE - orders will spend real USDC")
             if args.reset_paper:
                 broker.reset(settings.paper_starting_balance)
 

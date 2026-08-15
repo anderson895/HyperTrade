@@ -12,6 +12,7 @@ It is never silently resized, and leverage is never raised to make it fit.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from enum import Enum
 from typing import ClassVar
@@ -86,6 +87,21 @@ def estimate_liquidation_price(
     absorbable = 1.0 / leverage - asset.maintenance_margin_fraction
     absorbable = max(absorbable, 0.0)
     return entry_price * (1.0 - side.sign * absorbable)
+
+
+def minimum_leverage_for(
+    risk_usdc: float, stop_distance: float, entry_price: float, equity_usdc: float
+) -> int:
+    """The lowest whole leverage at which this trade's notional fits the equity.
+
+    Sizing comes from the stop distance, so a wide stop needs a large position, and
+    that position may need more margin than the leverage allows. This says how much
+    would be enough, instead of leaving the user to guess.
+    """
+    if stop_distance <= 0 or equity_usdc <= 0:
+        return 1
+    notional = (risk_usdc / stop_distance) * entry_price
+    return max(1, math.ceil(notional / equity_usdc))
 
 
 def plan_position(

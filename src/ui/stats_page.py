@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 from ..core.models import TradingMode
 from ..store import statistics
 from . import theme
-from .widgets import Card
+from .widgets import Card, wrapped_label
 
 PANEL_WIDTH = 420
 
@@ -37,12 +37,11 @@ class StatsPage(QWidget):
             self._labels[key] = label
             column.addWidget(label)
 
-        note = QLabel(
+        note = wrapped_label(
             "Paper and live results are counted separately. A closed round trip is "
             "one result; an entry on its own is not."
         )
         note.setProperty("muted", True)
-        note.setWordWrap(True)
         note.setMaximumWidth(PANEL_WIDTH)
 
         root = QVBoxLayout(self)

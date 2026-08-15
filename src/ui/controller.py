@@ -17,11 +17,11 @@ from PySide6.QtCore import QObject, Signal
 from ..broker.base import ManagedPosition
 from ..broker.paper import PaperBroker
 from ..config import AppSettings, save_settings
-from ..core.models import AssetMeta, Candle, Timeframe, TradingMode
+from ..core.models import AssetMeta, Candle, Side, Timeframe, TradingMode
+from ..core.sizing import RejectReason, Rejection, minimum_leverage_for, plan_position
 from ..engine import BotEngine
 from ..errors import FEED_ERRORS, TRADING_ERRORS
 from ..session import Session, open_session
-from ..strategy import TrendFollowing
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +41,29 @@ class Snapshot:
     margin_used: float = 0.0
     position: ManagedPosition | None = None
     error: str | None = None
+
+
+@dataclass
+class Preview:
+    """What the settings on screen would do, at the prices in front of us.
+
+    Answers the question the Settings page cannot otherwise answer: will this
+    actually trade? A risk and leverage pair that can never fit produces no trades
+    at all, which looks exactly like a market that never signals.
+    """
+
+    price: float = 0.0
+    equity: float = 0.0
+    stop_distance: float = 0.0
+    size: float = 0.0
+    notional: float = 0.0
+    margin: float = 0.0
+    problem: str | None = None
+    hint: str | None = None
+
+    @property
+    def ready(self) -> bool:
+        return self.price > 0 and self.stop_distance > 0
 
 
 class BotController(QObject):
@@ -69,15 +92,6 @@ class BotController(QObject):
     def engine(self) -> BotEngine | None:
         return self.session.engine if self.session else None
 
-    def strategy_parameters(self) -> dict:
-        """What the running strategy is configured with, for the chart's overlay.
-
-        Falls back to a fresh strategy's defaults before the session exists, so the
-        dashboard can draw its legend the moment the window opens.
-        """
-        strategy = self.session.engine.strategy if self.session else TrendFollowing()
-        return strategy.parameters()
-
     # --- lifecycle -------------------------------------------------------
 
     async def initialise(self) -> bool:
@@ -88,6 +102,7 @@ class BotController(QObject):
             # the window opens.
             await self.session.engine.load_history()
             self._error = None
+            self._warn_if_live_refused()
             return True
         except FEED_ERRORS as exc:
             log.warning("could not reach Hyperliquid: %s", exc)
@@ -136,7 +151,8 @@ class BotController(QObject):
         save_settings(self.conn, settings)
         self.settings = settings
         if self.session is not None:
-            self.session.apply_settings(settings)
+            await self.session.apply_settings(settings)
+            self._warn_if_live_refused()
         log.info(
             "settings saved: %s %s, risk %g USDC, %dx %s",
             settings.coin, settings.timeframe.label, settings.risk_usdc,
@@ -161,6 +177,57 @@ class BotController(QObject):
         if self.session is None:
             return []
         return await self.session.info.recent_candles(self.settings.coin, timeframe, count)
+
+    async def preview(self, settings: AppSettings) -> Preview:
+        """Size a hypothetical trade under `settings`, using live prices.
+
+        The timeframe decides the ATR and so the stop distance, so a timeframe the
+        engine is not running gets its own candles rather than a stale answer.
+        """
+        if self.session is None:
+            return Preview()
+
+        engine = self.session.engine
+        if settings.timeframe is self.settings.timeframe:
+            candles = engine.candles
+        else:
+            fetched = await self.fetch_chart_candles(settings.timeframe, 80)
+            candles = fetched[:-1] if len(fetched) > 1 else fetched
+        if not candles:
+            return Preview()
+
+        distance = engine.strategy.typical_stop_distance(candles)
+        account = await self.session.broker.account_state()
+        price = engine.last_mark or candles[-1].close
+        result = Preview(
+            price=price, equity=account.account_value, stop_distance=distance or 0.0
+        )
+        if not distance:
+            return result
+
+        plan = plan_position(
+            side=Side.LONG,
+            entry_price=price,
+            stop_price=price - distance,
+            risk_usdc=settings.risk_usdc,
+            equity_usdc=account.account_value,
+            leverage=settings.leverage,
+            asset=self.session.asset,
+        )
+        if isinstance(plan, Rejection):
+            result.problem = plan.reason.value.replace("_", " ")
+            if plan.reason is RejectReason.EXCEEDS_LEVERAGE_CAP:
+                needed = minimum_leverage_for(
+                    settings.risk_usdc, distance, price, account.account_value
+                )
+                fits = settings.risk_usdc * settings.leverage / needed
+                result.hint = f"needs {needed}x, or risk of about {fits:,.2f} USDC"
+            return result
+
+        result.size = plan.size
+        result.notional = plan.notional
+        result.margin = plan.margin_required
+        return result
 
     # --- polling ---------------------------------------------------------
 
@@ -198,6 +265,16 @@ class BotController(QObject):
         snapshot.position = await session.broker.managed_position()
 
         self.updated.emit(snapshot)
+
+    def _warn_if_live_refused(self) -> None:
+        """Live falling back to Paper must be impossible to miss.
+
+        Silently trading a simulated account while the user believes it is real
+        would be the worst failure this app could have.
+        """
+        reason = self.session.fell_back_to_paper if self.session else None
+        if reason:
+            self._fail(f"Live mode refused - running in PAPER instead: {reason}")
 
     def _fail(self, message: str) -> None:
         self._error = message
