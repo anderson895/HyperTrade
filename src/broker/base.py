@@ -51,6 +51,18 @@ class Broker(ABC):
     def mode(self) -> TradingMode:
         """Which mode this broker represents, for logs and the UI badge."""
 
+    @property
+    @abstractmethod
+    def balance(self) -> float:
+        """Realised cash, excluding an open position's unrealised profit.
+
+        Declared here because it was not: only the paper broker had it, and both
+        the dashboard refresh and the console's closing summary read it off
+        whichever broker they were given. In Live that raised `AttributeError`
+        once a second and the UI stopped updating entirely — the first thing to go
+        wrong the first time live mode was ever switched on.
+        """
+
     @abstractmethod
     async def account_state(self) -> AccountState:
         """Equity, margin, and open positions."""

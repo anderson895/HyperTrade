@@ -6,9 +6,11 @@ what the broker concludes from the exchange's answers. Every number that decides
 much is bought, at what price, and where the stop goes is asserted.
 """
 
+from dataclasses import replace
+
 import pytest
 
-from src.broker.base import BrokerError
+from src.broker.base import Broker, BrokerError
 from src.broker.live import LiveBroker
 from src.core.models import AccountState, AssetMeta, FillReason, MarginMode, Position, Side
 from src.core.sizing import PositionPlan, plan_position
@@ -374,6 +376,33 @@ async def test_the_account_is_read_from_the_exchange(broker):
     state = await broker.account_state()
     assert state.account_value == 1_000.0
     assert broker.mode is TradingMode.LIVE
+
+
+async def test_the_broker_reports_a_balance(broker):
+    """Regression: only the paper broker had `balance`, and both the dashboard
+    refresh and the console's closing summary read it off whichever broker they
+    were handed. The first time Live was switched on, the UI raised AttributeError
+    once a second and stopped updating."""
+    await broker.account_state()
+    assert broker.balance == 1_000.0
+
+
+async def test_the_balance_takes_out_unrealised_profit(broker):
+    """`balance` means realised cash in the paper broker. Hyperliquid reports
+    account value with the open position's profit already in it, so the two would
+    otherwise mean different things under one name."""
+    broker.fake_info.position = long_position()
+    broker.fake_info.position = replace(broker.fake_info.position, unrealized_pnl=120.0)
+
+    await broker.account_state()
+
+    assert broker.balance == pytest.approx(880.0)
+
+
+def test_every_broker_must_report_a_balance():
+    """The interface, not just the two implementations - so the next broker cannot
+    repeat this."""
+    assert "balance" in Broker.__abstractmethods__
 
 
 # --- surviving a restart --------------------------------------------------

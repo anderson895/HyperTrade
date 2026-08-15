@@ -42,6 +42,7 @@ from . import theme
 from .about_page import AboutPage
 from .alert_banner import AlertBanner
 from .bottom_bar import BottomBar
+from .busy_overlay import BusyOverlay
 from .chrome import PageHeader, StatusBar, TopBar, divider
 from .controller import BotController, Snapshot
 from .dashboard_page import DashboardPage
@@ -94,6 +95,10 @@ class MainWindow(QMainWindow):
         sidebar = self._build_sidebar()
         self._build_pages(conn, settings)
         self.setCentralWidget(self._build_body(sidebar))
+
+        # Parented to the central widget so it covers the pages and the bottom bar,
+        # which is the point — START must not be reachable mid-rewire.
+        self.busy = BusyOverlay(self.centralWidget())
 
         self._apply_pointer_cursors(self.centralWidget())
         self._connect()
@@ -292,7 +297,7 @@ class MainWindow(QMainWindow):
 
     def _connect(self) -> None:
         self.controller.updated.connect(self._on_update)
-        self.controller.failed.connect(self.alert.show_error)
+        self.controller.failed.connect(self._on_failed)
         self.controller.settings_applied.connect(self._on_settings_applied)
 
         self._nav.currentRowChanged.connect(self._on_page_changed)
@@ -305,9 +310,7 @@ class MainWindow(QMainWindow):
         self.bottom.close_btn.clicked.connect(
             lambda: asyncio.ensure_future(self.controller.close_position())
         )
-        self.settings_page.saved.connect(
-            lambda settings: asyncio.ensure_future(self.controller.apply_settings(settings))
-        )
+        self.settings_page.saved.connect(self._on_settings_saved)
         self.settings_page.resetPaper.connect(
             lambda: asyncio.ensure_future(self.controller.reset_paper())
         )
@@ -461,9 +464,31 @@ class MainWindow(QMainWindow):
         if snapshot.error:
             self.alert.show_error(snapshot.error)
 
+    def _on_settings_saved(self, settings: AppSettings) -> None:
+        """Saving is not instant, so say so while it happens.
+
+        In Live mode this rebuilds the broker: a new `Exchange` is constructed,
+        which fetches the whole asset universe, and the account is read back. For a
+        few seconds the form looked untouched — no error, no change, no way to tell
+        the click had registered.
+        """
+        detail = (
+            "Connecting to Hyperliquid and checking the account"
+            if settings.is_live
+            else "Rebuilding the simulated account"
+        )
+        self.busy.start("Applying settings...", detail)
+        asyncio.ensure_future(self.controller.apply_settings(settings))
+
     def _on_settings_applied(self, settings: AppSettings) -> None:
+        self.busy.stop()
         self.settings_page.load(settings)
         self._refresh_config_labels()
+
+    def _on_failed(self, message: str) -> None:
+        """A failure ends whatever was being waited on, so the scrim goes too."""
+        self.busy.stop()
+        self.alert.show_error(message)
 
     def _refresh_config_labels(self) -> None:
         settings = self.controller.settings

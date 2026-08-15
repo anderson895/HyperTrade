@@ -92,6 +92,7 @@ class LiveBroker(Broker):
         self._clock = clock
         self._bracket: _Bracket | None = None
         self._seen_flat = True
+        self._balance = 0.0
 
     # --- Broker ----------------------------------------------------------
 
@@ -99,8 +100,27 @@ class LiveBroker(Broker):
     def mode(self) -> TradingMode:
         return TradingMode.LIVE
 
+    @property
+    def balance(self) -> float:
+        """Realised cash as of the last `account_state()` call.
+
+        Synchronous, to match the paper broker — but paper reads local state and
+        this has to ask the exchange, so the figure is cached from the last time it
+        did. Every caller reads it immediately after `account_state()`: the UI once
+        a second, the console once at shutdown.
+        """
+        return self._balance
+
     async def account_state(self) -> AccountState:
-        return await self._info.clearinghouse_state(self.account_address)
+        state = await self._info.clearinghouse_state(self.account_address)
+        # Equity less what the open position has not yet made or lost, which is what
+        # PaperBroker.balance means. Hyperliquid reports account value including
+        # unrealised profit, so it is taken back out here rather than the two modes
+        # quietly reporting different things under the same name.
+        self._balance = state.account_value - sum(
+            position.unrealized_pnl for position in state.positions
+        )
+        return state
 
     async def managed_position(self) -> ManagedPosition | None:
         position = await self._position()

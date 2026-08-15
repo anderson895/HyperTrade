@@ -1129,6 +1129,108 @@ def test_an_ordinary_failure_is_still_reported_and_does_not_quit(caplog, monkeyp
     assert "something broke" in caplog.text
 
 
+# --- the busy overlay -----------------------------------------------------
+
+
+async def _noop_apply(settings):
+    """Stands in for BotController.apply_settings, which needs a live session."""
+
+
+async def test_saving_says_it_is_working(qapp, conn):
+    """Saving in Live rebuilds the broker: a new Exchange is constructed, the asset
+    universe is fetched and the account is read back. For a few seconds the form
+    looked untouched - no error, no change, no sign the click had registered."""
+    window = MainWindow(conn, AppSettings())
+    applied = []
+
+    async def fake_apply(settings):
+        applied.append(settings)
+
+    window.controller.apply_settings = fake_apply
+
+    assert not window.busy.busy
+
+    window._on_settings_saved(AppSettings(trading_mode=TradingMode.LIVE))
+
+    # The scrim goes up before the work is even scheduled, which is the point.
+    assert window.busy.busy
+    assert "Applying settings" in window.busy._message.text()
+    assert "Hyperliquid" in window.busy._detail.text()
+
+    await asyncio.sleep(0)  # let the scheduled task run
+    assert len(applied) == 1
+
+
+async def test_the_overlay_names_what_paper_is_doing(qapp, conn):
+    window = MainWindow(conn, AppSettings())
+    window.controller.apply_settings = _noop_apply
+
+    window._on_settings_saved(AppSettings())
+
+    assert "simulated" in window.busy._detail.text().lower()
+
+
+async def test_the_overlay_lifts_when_the_settings_land(qapp, conn):
+    window = MainWindow(conn, AppSettings())
+    window.controller.apply_settings = _noop_apply
+    window._on_settings_saved(AppSettings())
+
+    window._on_settings_applied(AppSettings())
+
+    assert not window.busy.busy
+
+
+async def test_a_failure_also_lifts_the_overlay(qapp, conn):
+    """Otherwise a refused save leaves the user behind a scrim with a banner they
+    cannot reach."""
+    window = MainWindow(conn, AppSettings())
+    window.controller.apply_settings = _noop_apply
+    window._on_settings_saved(AppSettings())
+
+    window._on_failed("Could not reach Hyperliquid")
+
+    assert not window.busy.busy
+    assert window.alert.isVisibleTo(window)
+
+
+def test_the_overlay_lets_go_rather_than_trapping_anyone(qapp, conn):
+    """A user stuck behind a scrim is worse off than one looking at a stale form."""
+    from src.ui.busy_overlay import BusyOverlay
+
+    overlay = BusyOverlay()
+    overlay.start("Applying settings...")
+    assert overlay.busy
+
+    overlay._timeout.timeout.emit()  # the safety net firing
+
+    assert not overlay.busy
+
+
+def test_the_overlay_swallows_input_meant_for_the_form(qapp, conn):
+    """It covers the bottom bar too - START must not be reachable mid-rewire.
+
+    Driven with a stand-in rather than a real QMouseEvent: every constructor PySide
+    offers for one is deprecated, and what is being checked is that the handler
+    accepts the event rather than letting it through."""
+    from src.ui.busy_overlay import BusyOverlay
+
+    class Event:
+        def __init__(self):
+            self.accepted = False
+
+        def accept(self):
+            self.accepted = True
+
+    overlay = BusyOverlay()
+    overlay.start("Applying settings...")
+
+    click, key = Event(), Event()
+    overlay.mousePressEvent(click)
+    overlay.keyPressEvent(key)
+
+    assert click.accepted and key.accepted
+
+
 def test_errors_raise_the_alert_banner(qapp, conn):
     window = MainWindow(conn, AppSettings())
     assert not window.alert.isVisibleTo(window)
