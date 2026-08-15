@@ -227,13 +227,23 @@ is placed.**
 Purpose: don't hold leverage through CPI, FOMC, NFP. On Polymarket a bad entry cost the premium; on
 a leveraged perp it can liquidate the account.
 
-- Blackout window: `T-30min` to `T+15min` around a high-impact event *(proposed, configurable)*.
-- Inside the window: **no new entries**. Existing positions are held with their stops intact
-  *(proposed — the alternative is flat-before-news; ask the user which they want)*.
-- v1: manual toggle + a user-editable event list, same as PolyTrade's Economic Data Day block.
-- v2: economic calendar feed. Treat a feed failure as **"blackout active"**, not "no events" —
-  fail safe, not open.
-- The UI shows the next event and a countdown when a blackout is pending.
+**Built** — `src/data/calendar.py`, applied in `BotEngine._news_blocker`.
+
+- Blackout window: `T-30min` to `T+15min`, both editable in Settings. Asymmetric on purpose: the
+  approach to a release is when liquidity withdraws; afterwards it comes back.
+- Inside the window: **no new entries**. Existing positions are held with their stops intact —
+  closing on news would realise a loss the stop might never have taken.
+- v1: manual toggle, same as PolyTrade's Economic Data Day block. Kept as an override for when the
+  user knows something the calendar does not.
+- v2: **done.** ForexFactory weekly JSON feed, no API key, filtered to `country = USD` and
+  `impact = High`. Only the timing is used — trading the number is a different system.
+  A feed failure with nothing cached is treated as **"blackout active"**, not "no events": fail
+  safe, not open. A failed *refresh* falls back to the cached copy, so only a cold start with no
+  network stands the bot down.
+  The feed rate-limits — three fetches inside a few seconds returned 429 — so it is cached for an
+  hour, which puts a running bot at 24 requests a day at most.
+- **Still open:** the UI does not yet show the next event or a countdown when a blackout is
+  pending. The blackout itself is applied and logged; it is only the display that is missing.
 
 ---
 

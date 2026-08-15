@@ -237,6 +237,51 @@ def test_the_preview_names_settings_that_cannot_trade(qapp):
     assert "needs 4x" in verdict
 
 
+def test_the_news_blackout_settings_round_trip(qapp):
+    """Regression: these three were declared, persisted and validated, but had no
+    widget and were read by nothing. The blackout window was a number in a dataclass
+    that did not reach the engine."""
+    page = SettingsPage(AppSettings())
+    page.load(
+        AppSettings(
+            news_blackout_enabled=True,
+            news_blackout_before_min=45,
+            news_blackout_after_min=5,
+        )
+    )
+
+    assert page.news_auto.isChecked()
+    assert page.news_before.value() == 45
+
+    page.news_after.setValue(20)
+    settings = page.current()
+
+    assert settings.news_blackout_enabled
+    assert settings.news_blackout_before_min == 45
+    assert settings.news_blackout_after_min == 20
+
+
+def test_the_blackout_windows_grey_out_when_the_calendar_is_off(qapp):
+    page = SettingsPage(AppSettings())
+
+    page.news_auto.setChecked(False)
+    assert not page.news_before.isEnabled()
+
+    page.news_auto.setChecked(True)
+    assert page.news_before.isEnabled()
+
+
+def test_the_blackout_controls_stay_live_while_the_bot_runs(qapp):
+    """News is the one thing worth reacting to mid-session, and standing aside
+    never puts money at risk."""
+    page = SettingsPage(AppSettings())
+    page.set_enabled(False)
+
+    assert not page.risk.isEnabled()
+    assert page.news_block.isEnabled()
+    assert page.news_auto.isEnabled()
+
+
 def test_changing_risk_or_leverage_asks_for_a_new_preview(qapp):
     page = SettingsPage(AppSettings())
     asked = []

@@ -276,13 +276,36 @@ class SettingsPage(QWidget):
             "the right sizes one for you."
         )
 
-        self.news_block = QCheckBox("No new trades today (economic data day)")
-        self.news_block.setToolTip("CPI, FOMC, NFP. Open positions keep their stops.")
-        card.field("News Events", self.news_block)
-        card.note(
-            "Leverage through a data release is how accounts get liquidated. "
-            "Existing positions are left alone with their stops in place."
+        self.news_auto = QCheckBox("Pause around high-impact US releases")
+        self.news_auto.setToolTip(
+            "CPI, FOMC, NFP and the like, read from an economic calendar.\n"
+            "If the calendar cannot be reached the bot stands aside rather than "
+            "guessing that the coast is clear."
         )
+        card.field("News Events", self.news_auto)
+
+        self.news_before = QSpinBox()
+        self.news_before.setRange(0, 240)
+        self.news_before.setSuffix(" min")
+        self.news_after = QSpinBox()
+        self.news_after.setRange(0, 240)
+        self.news_after.setSuffix(" min")
+        card.start_grid()
+        card.grid_field("Pause Before", self.news_before, 0)
+        card.grid_field("Pause After", self.news_after, 1)
+
+        self.news_block = QCheckBox("No new trades today (economic data day)")
+        self.news_block.setToolTip(
+            "A manual override, on top of the calendar. Open positions keep their stops."
+        )
+        card.field("Manual Override", self.news_block)
+        card.note(
+            "Leverage through a data release is how accounts get liquidated - "
+            "liquidity thins out and a stop fills wherever the next resting order "
+            "happens to be. Existing positions are left alone with their stops in "
+            "place; only new entries are held back."
+        )
+        self.news_auto.toggled.connect(self._refresh_news_fields)
 
         card.finish()
         return card
@@ -301,6 +324,10 @@ class SettingsPage(QWidget):
         self.slippage.setValue(settings.slippage * 100)
         self.daily_loss.setValue(settings.daily_loss_limit_usdc)
         self.news_block.setChecked(settings.economic_data_day_block)
+        self.news_auto.setChecked(settings.news_blackout_enabled)
+        self.news_before.setValue(settings.news_blackout_before_min)
+        self.news_after.setValue(settings.news_blackout_after_min)
+        self._refresh_news_fields()
         self.address.setText(settings.account_address)
         self._refresh_notes()
 
@@ -316,6 +343,9 @@ class SettingsPage(QWidget):
         settings.slippage = self.slippage.value() / 100
         settings.daily_loss_limit_usdc = self.daily_loss.value()
         settings.economic_data_day_block = self.news_block.isChecked()
+        settings.news_blackout_enabled = self.news_auto.isChecked()
+        settings.news_blackout_before_min = self.news_before.value()
+        settings.news_blackout_after_min = self.news_after.value()
         settings.account_address = self.address.text().strip()
         return settings
 
@@ -324,7 +354,11 @@ class SettingsPage(QWidget):
         self.leverage.setMaximum(maximum)
 
     def set_enabled(self, enabled: bool) -> None:
-        """Locked while the bot runs, except the blackout toggle."""
+        """Locked while the bot runs, except the blackout controls.
+
+        Those stay live because news is the one thing you may need to react to
+        mid-session, and standing aside never puts money at risk.
+        """
         for widget in (
             self.mode, self.network, self.timeframe, self.margin, self.risk,
             self.leverage, self.balance, self.slippage, self.daily_loss,
@@ -332,8 +366,16 @@ class SettingsPage(QWidget):
         ):
             widget.setEnabled(enabled)
         self.news_block.setEnabled(True)
+        self.news_auto.setEnabled(True)
+        self._refresh_news_fields()
 
     # --- internals -------------------------------------------------------
+
+    def _refresh_news_fields(self) -> None:
+        """The two windows mean nothing with the calendar off, so they grey out."""
+        live = self.news_auto.isChecked()
+        self.news_before.setEnabled(live)
+        self.news_after.setEnabled(live)
 
     def _refresh_notes(self) -> None:
         live = self.mode.currentData() is TradingMode.LIVE

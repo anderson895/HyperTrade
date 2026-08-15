@@ -33,12 +33,13 @@ The full specification lives in [`SKILL.md`](SKILL.md). This file covers running
 | Paper engine (`src/broker/paper.py`) | Done, tested, survives restart |
 | Trade history + statistics (`src/store.py`) | Done, tested |
 | Bot engine (`src/engine.py`) | Done, tested |
+| News blackout (`src/data/calendar.py`) | Done, tested, verified against the live feed |
 | Desktop UI (`src/ui/`) | Done, smoke-tested off-screen |
 | Console runner (`src/console.py`) | Done |
 | Live execution (`src/broker/live.py`) | Written and unit-tested — **never run against real money** |
 | WebSocket feed | Not started — the engine polls REST |
 
-275 tests passing (264 offline, 11 against the live API).
+319 tests passing (303 offline, 16 against live APIs — Hyperliquid and the calendar feed).
 
 Verified against mainnet on 2026-08-15: `api.hyperliquid.xyz` is reachable with no VPN and no
 custom DNS resolver. BTC is `szDecimals=5`, `maxLeverage=40x`, so prices take one decimal place.
@@ -89,8 +90,38 @@ fit produces no trades at all, which looks exactly like a market that never sign
 to wait and wonder.
 
 Settings are locked while the bot runs — changing the timeframe mid-trade would leave the strategy
-reasoning about candles it never saw. The news blackout toggle stays live, because that is the one
-switch you may need mid-session.
+reasoning about candles it never saw. The news blackout controls stay live, because that is the one
+thing you may need to change mid-session, and standing aside never puts money at risk.
+
+### The news blackout
+
+**No new entries around high-impact US releases** — CPI, FOMC, NFP and the like. Leverage through a
+data release is how accounts get liquidated: the book thins out and a stop that normally fills
+within a tick fills wherever the next resting order happens to be. The strategy has no view on any
+of that; it reads a candle close. So the bot stands aside.
+
+The schedule comes from [ForexFactory](https://nfs.faireconomy.media/ff_calendar_thisweek.json)'s
+weekly JSON feed — free, no API key — filtered to `country = USD` and `impact = High`. Only the
+timing is used; forecast and actual values are ignored, because trading the number is a different
+system to this one. The feed is cached for an hour, so a running bot fetches it 24 times a day at
+most. It rate-limits: three fetches inside a few seconds earned a 429.
+
+The window defaults to **30 minutes before, 15 after**, and is asymmetric on purpose — the approach
+to a release is when liquidity withdraws, and the minutes afterwards are when it comes back. Both
+are editable in Settings.
+
+**It fails closed.** If the calendar cannot be read at all, the bot does not trade and says so:
+`no entry: economic calendar unavailable - standing aside`. Not knowing whether CPI is five minutes
+away is not a reason to assume it isn't. A *refresh* that fails falls back to the cached copy — an
+hour-stale calendar is still a good calendar — so only a cold start with no network stands the bot
+down.
+
+**An open position is never touched by news.** Its stop and target are already with the exchange;
+closing on a release would realise a loss the stop might never have taken. Only new entries are
+held back.
+
+Beside it is a manual override — `No new trades today (economic data day)` — for when you know
+something the calendar does not.
 
 **STOP BOT does not close an open position.** It stops looking for entries and leaves the position
 with its stop and target in place. Use **Close position** to flatten.
@@ -225,6 +256,7 @@ src/
     indicators.py EMA, true range, Wilder ATR, crossover detection
   data/
     hl_info.py   read-only /info client (meta, candles, mids, account state)
+    calendar.py  high-impact US releases, for the news blackout
   strategy/
     base.py      Strategy interface + registry behind the Settings dropdown
     trend_following.py  EMA crossover, ATR stop, 2R target

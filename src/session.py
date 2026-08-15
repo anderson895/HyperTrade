@@ -23,6 +23,7 @@ from .broker.live import LiveBroker
 from .broker.paper import PaperBroker
 from .config import AppSettings
 from .core.models import AssetMeta
+from .data.calendar import EconomicCalendar
 from .data.hl_info import HyperliquidInfo
 from .engine import DEFAULT_POLL_SECONDS, BotEngine
 from .strategy import TrendFollowing
@@ -47,6 +48,10 @@ class Session:
         self.settings = settings
         self.info = info
         self.asset = asset
+        #: Shared across re-wirings so a settings change does not throw away the
+        #: cached calendar and refetch it. Backed by the database, so a restart does
+        #: not either — the feed rate-limits, and the blackout fails closed.
+        self.calendar = EconomicCalendar(conn=conn)
         #: Why Live was refused, when it was. None when the mode is as requested.
         self.fell_back_to_paper: str | None = None
         self.broker: Broker
@@ -61,6 +66,7 @@ class Session:
             strategy=TrendFollowing(),
             asset=self.asset,
             conn=self._conn,
+            calendar=self.calendar,
             poll_seconds=self._poll_seconds,
         )
 
@@ -76,6 +82,7 @@ class Session:
     async def aclose(self) -> None:
         if self.engine.is_running:
             await self.engine.stop()
+        await self.calendar.aclose()
         await self.info.aclose()
 
     # --- brokers ---------------------------------------------------------

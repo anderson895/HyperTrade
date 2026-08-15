@@ -30,6 +30,7 @@ from .core.sizing import (
     minimum_leverage_for,
     plan_position,
 )
+from .data.calendar import CalendarUnavailable, EconomicCalendar
 from .data.hl_info import HyperliquidInfo
 from .errors import TRADING_ERRORS
 from .store import realised_since
@@ -61,18 +62,23 @@ class BotEngine:
         strategy: Strategy,
         asset: AssetMeta,
         conn: sqlite3.Connection | None = None,
+        calendar: EconomicCalendar | None = None,
         poll_seconds: float = DEFAULT_POLL_SECONDS,
         throttle_requests: bool = True,
     ) -> None:
         """`throttle_requests` floors how often `poll` refetches. On in the app, so a
         once-a-second UI refresh does not become sixty requests a minute; off in
-        tests, so a poll always fetches."""
+        tests, so a poll always fetches.
+
+        `calendar` is None in most tests: with no calendar there is no news blackout
+        to apply, which keeps every test that is not about news free of it."""
         self.settings = settings
         self.info = info
         self.broker = broker
         self.strategy = strategy
         self.asset = asset
         self.conn = conn
+        self.calendar = calendar
         self.poll_seconds = poll_seconds
         self.throttle_requests = throttle_requests
 
@@ -359,7 +365,34 @@ class BotEngine:
             return "already holding a position"
         if self.settings.economic_data_day_block:
             return "news blackout is on — economic data day"
+        news = await self._news_blocker()
+        if news:
+            return news
         return self._daily_loss_blocker()
+
+    async def _news_blocker(self) -> str | None:
+        """Whether a high-impact release is close enough to stand aside for.
+
+        **Fails closed.** A calendar that cannot be read means the bot does not know
+        whether CPI is five minutes away, and entering on a guess is exactly the
+        risk this setting exists to remove. Missing a few entries costs a trend
+        system very little; being long into a print at 5x does not.
+
+        An open position is untouched either way — its stop and target are already
+        with the exchange, and closing on news would realise a loss the stop might
+        never have taken.
+        """
+        if not self.settings.news_blackout_enabled or self.calendar is None:
+            return None
+
+        try:
+            return await self.calendar.reason_not_to_trade(
+                self.settings.news_blackout_before_min,
+                self.settings.news_blackout_after_min,
+            )
+        except CalendarUnavailable as exc:
+            log.warning("no entries while the economic calendar is unreadable: %s", exc)
+            return "economic calendar unavailable - standing aside"
 
     def _daily_loss_blocker(self) -> str | None:
         limit = self.settings.daily_loss_limit_usdc

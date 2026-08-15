@@ -52,6 +52,19 @@ _MIGRATIONS: list[str] = [
 
     CREATE INDEX IF NOT EXISTS fills_time ON fills (time_ms);
     """,
+    # v3 — the economic calendar, cached across restarts.
+    #
+    # The feed rate-limits hard (429 with Retry-After ~67s), and the blackout fails
+    # closed: a cold start that gets rate-limited would stand the bot down until the
+    # next candle close, which on 4h is four hours of not trading for a reason that
+    # has nothing to do with the market. Surviving a restart removes that entirely.
+    """
+    CREATE TABLE IF NOT EXISTS calendar_cache (
+        id         INTEGER PRIMARY KEY CHECK (id = 1),
+        fetched_ms INTEGER NOT NULL,
+        payload    TEXT    NOT NULL
+    );
+    """,
 ]
 
 

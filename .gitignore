@@ -4,7 +4,10 @@ __pycache__/
 .pytest_cache/
 
 # Runtime data: SQLite DB, logs, any local secrets. Never commit.
-data/
+# Anchored with a leading slash so it means *this* data directory. Unanchored,
+# `data/` matched any directory of that name at any depth — which silently kept
+# src/data/ (the whole Hyperliquid client) out of the repository.
+/data/
 *.log
 *.db
 .env
