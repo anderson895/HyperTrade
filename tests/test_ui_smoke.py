@@ -241,31 +241,35 @@ def test_the_preview_names_settings_that_cannot_trade(qapp):
     assert "needs 4x" in verdict
 
 
-def test_the_strategy_dropdown_offers_every_registered_strategy(qapp):
-    from src.strategy import available
-
+def test_the_strategy_is_named_but_not_offered_as_a_choice(qapp):
+    """One strategy ships, so the dropdown was a control that could not control
+    anything. It is still stated - a live account was once started on the wrong
+    strategy, and the fix was saying which one runs, not offering a choice."""
     page = SettingsPage(AppSettings())
-    offered = {page.strategy.itemData(i) for i in range(page.strategy.count())}
 
-    assert offered == set(available())
+    assert not hasattr(page, "strategy")  # no input
+    assert "Volume rejection" in page.strategy_name.text()  # but it is named
+    assert "Fades failed breakouts" in page.strategy_note.text()
 
 
-def test_the_strategy_choice_round_trips(qapp):
+def test_the_strategy_survives_a_save_without_a_widget_to_hold_it(qapp):
+    """Nothing on the page reads it back any more, so it has to carry through from
+    the loaded settings or every save would blank it."""
     page = SettingsPage(AppSettings())
     page.load(AppSettings(strategy="volume_rejection"))
 
-    assert page.strategy.currentData() == "volume_rejection"
     assert page.current().strategy == "volume_rejection"
 
 
-def test_a_saved_strategy_this_build_lost_falls_back_visibly(qapp):
-    """findData returns -1, and leaving the combo there would silently save
-    whatever happened to be first."""
+def test_a_saved_strategy_this_build_lost_falls_back_rather_than_dead_ending(qapp):
+    """Without a dropdown there is no control left to correct an unknown strategy,
+    and `validate` refuses to start on one. Left alone it would be unfixable from
+    the UI, so `load` normalises it and the page shows what will actually run."""
     page = SettingsPage(AppSettings())
     page.load(AppSettings(strategy="deleted_strategy"))
 
-    assert page.strategy.currentIndex() == 0
     assert page.current().strategy in available()
+    assert "Volume rejection" in page.strategy_name.text()
 
 
 def test_the_exit_settings_round_trip(qapp):

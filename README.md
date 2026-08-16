@@ -1,9 +1,12 @@
 # HyperTrade
 
 Windows desktop trading bot for the **BTC-USD perpetual on Hyperliquid**, implementing the
-15-Minute Volume Rejection Strategy specified in [`strategy.txt`](strategy.txt). Paper and Live
-modes, seven timeframes, risk-per-trade sizing, native exchange stops and targets, a trailing stop,
-and a news blackout.
+15-Minute Volume Rejection Strategy. Paper and Live modes, seven timeframes, risk-per-trade sizing,
+native exchange stops and targets, a trailing stop, and a news blackout.
+
+The strategy was specified by the client, not chosen here. Those source documents live in
+`development_guide/`, which is deliberately kept out of this repository — every rule they set is
+reproduced below, so nothing you need is behind that door.
 
 Repository: <https://github.com/anderson895/HyperTrade>
 
@@ -24,9 +27,9 @@ is the evidence: someone was there in size and lost. The bot takes the other sid
 It is a **mean-reversion** system. It bets against the move that just happened, which is the
 opposite instinct to a breakout system. Worth knowing before the losses start looking like bugs.
 
-Every rule below comes from [`strategy.txt`](strategy.txt); the periods and multiples are its
-author's, reproduced rather than tuned. A strategy that does not match the specification it was
-written from tells you nothing about what that specification does.
+Every rule below comes from the client's specification; the periods and multiples are its author's,
+reproduced rather than tuned. A strategy that does not match the specification it was written from
+tells you nothing about what that specification does.
 
 | Specification | Where it lives | Notes |
 |---|---|---|
@@ -45,7 +48,8 @@ written from tells you nothing about what that specification does.
 
 ### Where this deviates from the reference script, and why
 
-`strategy.txt` includes a working Python script. The detection logic here matches it bar for bar —
+The specification ships with a working Python script. The detection logic here matches it bar for
+bar —
 same lookbacks, same slicing, same comparisons. Three things are done differently, each because the
 script has a defect at that point:
 

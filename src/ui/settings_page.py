@@ -1,13 +1,14 @@
-"""Settings page — two cards under a titled header, following the reference design.
+"""Settings page — Account, Trading and Exit Rules under a titled header.
 
-Account on the left, Trading on the right as a two-column grid. What a given risk
-and leverage pair would actually produce is shown on the About page instead: it is
-reference material, consulted once, not something to read on every edit.
+Trading is laid out as a two-column grid. What a given risk and leverage pair would
+actually produce is shown on the About page instead: it is reference material,
+consulted once, not something to read on every edit.
 """
 
 from __future__ import annotations
 
 import inspect
+from dataclasses import replace
 
 import qtawesome as qta
 from PySide6.QtCore import Signal
@@ -179,7 +180,6 @@ class SettingsPage(QWidget):
         self.load(settings)
         self.mode.currentIndexChanged.connect(self._refresh_notes)
         self.timeframe.currentIndexChanged.connect(self._refresh_notes)
-        self.strategy.currentIndexChanged.connect(self._refresh_strategy_note)
 
         # Anything that changes the shape of a trade re-asks for a preview.
         for widget in (self.timeframe, self.margin):
@@ -322,14 +322,14 @@ class SettingsPage(QWidget):
     def _build_trading_card(self) -> TitledCard:
         card = TitledCard("fa6s.chart-line", "Trading Configuration")
 
-        self.strategy = QComboBox()
-        for key, cls in sorted(available().items()):
-            self.strategy.addItem(cls.display_name, key)
-        self.strategy.setToolTip(
-            "Trend following buys breakouts; volume rejection fades them.\n"
-            "They disagree by design, so only one runs at a time."
-        )
-        card.field("Strategy", self.strategy)
+        # Shown, not chosen. One strategy ships, so a dropdown holding a single
+        # item was a control that could not control anything. It still has to be
+        # *stated* — a live account was once started on the wrong strategy, and
+        # the fix for that was saying which one is loaded, not offering a choice.
+        self.strategy_name = QLabel()
+        self.strategy_name.setObjectName("strategyName")
+        self.strategy_name.setStyleSheet("font-weight: 600; background: transparent")
+        card.field("Strategy", self.strategy_name)
         self.strategy_note = card.note()
 
         card.start_grid()
@@ -463,10 +463,13 @@ class SettingsPage(QWidget):
         self.news_after.setValue(settings.news_blackout_after_min)
         self._refresh_news_fields()
 
-        index = self.strategy.findData(settings.strategy)
-        # A saved strategy this build no longer has would set the combo to -1 and
-        # silently save the first entry back. Fall back visibly instead.
-        self.strategy.setCurrentIndex(index if index >= 0 else 0)
+        # A saved config naming a strategy this build no longer has used to be
+        # recoverable by touching the dropdown. Without one, it would be a dead end:
+        # `validate` refuses to start on an unknown strategy and there would be no
+        # control left to change it. So it is normalised here instead, on the copy
+        # `current()` builds from, and `_refresh_strategy_note` says what happened.
+        if settings.strategy not in available():
+            self._settings = replace(settings, strategy=AppSettings().strategy)
         self.take_profit.setValue(settings.take_profit_rr)
         self.stop_buffer.setValue(settings.stop_buffer_pct * 100)
         self.trailing.setChecked(settings.trailing_enabled)
@@ -503,7 +506,8 @@ class SettingsPage(QWidget):
         settings.news_blackout_before_min = self.news_before.value()
         settings.news_blackout_after_min = self.news_after.value()
         settings.account_address = self.address.text().strip()
-        settings.strategy = self.strategy.currentData()
+        # `settings` is copied from `self._settings`, which `load` normalised, so
+        # the strategy carries through without a widget to read it back from.
         settings.take_profit_rr = self.take_profit.value()
         settings.stop_buffer_pct = self.stop_buffer.value() / 100
         settings.trailing_enabled = self.trailing.isChecked()
@@ -527,7 +531,7 @@ class SettingsPage(QWidget):
             self.mode, self.network, self.timeframe, self.margin, self.risk,
             self.leverage, self.balance, self.slippage, self.daily_loss,
             self.address, self.agent_key, self.button_save, self.button_reset,
-            self.strategy, self.take_profit, self.stop_buffer,
+            self.take_profit, self.stop_buffer,
             self.trailing, self.trail_activation, self.trail_distance,
             self.risk_unit, self.clamp_size,
             self.post_only, self.entry_expiry,
@@ -564,9 +568,10 @@ class SettingsPage(QWidget):
         self.entry_expiry.setEnabled(self.post_only.isChecked())
 
     def _refresh_strategy_note(self) -> None:
-        """Say what the chosen strategy does, and grey what it does not use."""
-        chosen = self.strategy.currentData()
+        """Name the strategy that will run, say what it does, grey what it ignores."""
+        chosen = self._settings.strategy
         strategy = available().get(chosen)
+        self.strategy_name.setText(strategy.display_name if strategy else chosen)
         self.strategy_note.setText(STRATEGY_NOTES.get(chosen, ""))
         # Read off the constructor rather than a hardcoded name, so a strategy
         # added later greys the right fields without anyone remembering to come
