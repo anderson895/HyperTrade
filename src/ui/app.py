@@ -18,16 +18,31 @@ import sys
 os.environ.setdefault("QT_API", "pyside6")
 
 import qasync  # noqa: E402
+import qtawesome as qta  # noqa: E402
+from PySide6.QtGui import QIcon  # noqa: E402
 from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from ..config import load_settings  # noqa: E402
 from ..db import connect, get_ui_state  # noqa: E402
 from ..logging_setup import setup_logging  # noqa: E402
-from ..paths import log_path  # noqa: E402
+from ..paths import app_dir, log_path  # noqa: E402
 from .main_window import MainWindow  # noqa: E402
-from .theme import STYLESHEET  # noqa: E402
+from .theme import BRAND, STYLESHEET  # noqa: E402
 
 log = logging.getLogger("hypertrade")
+
+
+def app_icon() -> QIcon:
+    """The title bar and taskbar mark: the same bolt the sidebar draws.
+
+    Prefers the packaged `.ico`, which carries every size Windows asks for, and
+    falls back to rendering the glyph directly so a source checkout without the
+    asset still shows the right thing rather than Qt's default.
+    """
+    packaged = app_dir() / "assets" / "hypertrade.ico"
+    if packaged.is_file():
+        return QIcon(str(packaged))
+    return qta.icon("fa6s.bolt", color=BRAND)
 
 
 def run_gui(verbose: bool = False) -> int:
@@ -36,6 +51,7 @@ def run_gui(verbose: bool = False) -> int:
 
     app = QApplication(sys.argv)
     app.setApplicationName("HyperTrade")
+    app.setWindowIcon(app_icon())
     app.setStyleSheet(STYLESHEET)
 
     loop = qasync.QEventLoop(app)

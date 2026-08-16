@@ -457,6 +457,29 @@ timeframe into a positive-looking average.
 
 Rows below 25 trades are marked `<- too few to read`. Believe the marker.
 
+## Building a release
+
+```powershell
+.\venv\Scripts\python.exe -m pip install pyinstaller
+.\venv\Scripts\python.exe build.py
+```
+
+Produces `dist/HyperTrade/HyperTrade.exe` and `dist/HyperTrade-<version>-windows.zip`.
+Unzip anywhere and run the executable — `data/` is created beside it, so the whole folder
+can be moved or copied and takes its database and logs with it.
+
+A folder build rather than a single file. One-file PyInstaller unpacks the entire payload
+to a temporary directory on *every* launch, which on a PySide6 app is ten to thirty seconds
+of nothing happening — indistinguishable from a program that failed to start.
+
+`build.py` finishes by running the packaged executable through `--console --once`: a real
+startup, one poll of the exchange, an orderly exit. A bundle missing a module still builds
+and still produces an executable; it fails at launch, on someone else's machine. That check
+is what caught the entry point being frozen without its package.
+
+The icon is generated, not drawn: `tools/make_icon.py` renders the same Font Awesome bolt
+the sidebar uses, in the same brand colour, so the two cannot drift apart.
+
 ## Tests
 
 ```powershell

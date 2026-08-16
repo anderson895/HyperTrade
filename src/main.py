@@ -3,20 +3,27 @@
     .\\venv\\Scripts\\python.exe -m src.main              # the desktop window
     .\\venv\\Scripts\\python.exe -m src.main --console    # headless, in the terminal
 
-Paper mode only for now: live execution is not implemented, and choosing it stops
-with a message rather than pretending to trade.
+Also the script PyInstaller freezes, so the guard below has to know the difference
+between being run loose from a source tree and being run from inside a bundle.
 """
 
 from __future__ import annotations
+
+import sys
 
 # Running this file directly - `python src\main.py`, or `python main.py` from inside
 # src\ - leaves it outside its package, and every relative import below fails with
 # "attempted relative import with no known parent package". Rather than make that the
 # user's problem, put the project root on the path and re-run properly as a module.
-if __package__ in (None, ""):
+#
+# Frozen is the exception, and it has to be: a bundle has no `src` package to import,
+# because PyInstaller flattens this file to the top level. Re-running as a module
+# there died on `ModuleNotFoundError: No module named 'src'` before anything else
+# ran — the packaged app could not start at all. The relative imports below work in a
+# bundle regardless, since PyInstaller records this module with its package intact.
+if __package__ in (None, "") and not getattr(sys, "frozen", False):
     import pathlib
     import runpy
-    import sys
 
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
     runpy.run_module("src.main", run_name="__main__", alter_sys=True)
