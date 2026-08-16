@@ -148,6 +148,53 @@ def test_loss_making_timeframes_are_flagged(qapp):
     assert not page.timeframe_note.isVisibleTo(page)
 
 
+def test_no_field_is_offered_in_a_mode_where_nothing_acts_on_it(qapp):
+    """The whole audit in one assertion. Each of these is read by exactly one of
+    the two brokers, so showing it in the other mode offers a control that controls
+    nothing - and in the paper balance's case, one that reads as a starting stake
+    for real money."""
+    page = SettingsPage(AppSettings())
+
+    # widget, label, and the mode it is allowed to appear in
+    mode_only = (
+        (page.address, page._address_label, TradingMode.LIVE),
+        (page.agent_key, page._key_label, TradingMode.LIVE),
+        # Sent to Hyperliquid with the leverage; PaperBroker.set_leverage drops it.
+        (page.margin, page._margin_label, TradingMode.LIVE),
+        # Meaningless in Live, where the balance is whatever the exchange says.
+        (page.balance, page._balance_label, TradingMode.PAPER),
+    )
+
+    for mode in (TradingMode.PAPER, TradingMode.LIVE):
+        page.load(AppSettings(trading_mode=mode))
+        for widget, label, belongs_to in mode_only:
+            expected = mode is belongs_to
+            assert widget.isVisibleTo(page) is expected, f"{label.text()} in {mode}"
+            assert label.isVisibleTo(page) is expected, f"{label.text()} caption in {mode}"
+
+
+def test_the_paper_balance_is_hidden_in_live_mode(qapp):
+    """It does nothing in Live - the balance is whatever the exchange says. On
+    screen beside real credentials it reads as a starting stake for real money."""
+    page = SettingsPage(AppSettings())
+    page.load(AppSettings(trading_mode=TradingMode.PAPER))
+    assert page.balance.isVisibleTo(page)
+    assert page._balance_label.isVisibleTo(page)
+
+    page.load(AppSettings(trading_mode=TradingMode.LIVE))
+    assert not page.balance.isVisibleTo(page)
+    # The caption goes too. A stranded label is worse than neither.
+    assert not page._balance_label.isVisibleTo(page)
+
+
+def test_the_paper_balance_still_round_trips_while_hidden(qapp):
+    """Hidden is not discarded: switching to Live and back must not wipe it."""
+    page = SettingsPage(AppSettings())
+    page.load(AppSettings(trading_mode=TradingMode.LIVE, paper_starting_balance=2_500.0))
+
+    assert page.current().paper_starting_balance == pytest.approx(2_500.0)
+
+
 def test_live_mode_warns_that_it_spends_real_money(qapp):
     page = SettingsPage(AppSettings())
     page.load(AppSettings(trading_mode=TradingMode.LIVE))
@@ -355,8 +402,9 @@ def test_every_settings_field_reaches_the_settings_object(qapp):
     editable = {field.name for field in dataclasses.fields(changed)} - {
         # Not on this form by design.
         "trading_mode", "network", "account_address", "coin",
-        "paper_starting_balance", "max_concurrent_positions", "risk_pct",
-        "clamp_size_to_leverage",
+        "paper_starting_balance", "risk_pct", "clamp_size_to_leverage",
+        # Live only, so it is not on the form in the Paper settings this builds.
+        "margin_mode",
         # Legacy. The form edits `daily_loss_limit_pct` and clears this on save, so
         # a zeroed percentage cannot hand control back to an old fixed limit.
         "daily_loss_limit_usdc",

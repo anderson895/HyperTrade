@@ -234,7 +234,11 @@ class TitledCard(Card):
         self._column.addLayout(self._grid)
         self._row = 0
 
-    def grid_field(self, label: str, widget: QWidget, column: int, span: int = 1) -> None:
+    def grid_field(
+        self, label: str, widget: QWidget, column: int, span: int = 1
+    ) -> QLabel:
+        """Returns the caption so a field that applies in only one mode can hide its
+        label along with itself. A stranded caption is worse than neither."""
         caption = QLabel(label)
         caption.setProperty("muted", True)
         caption.setContentsMargins(0, 8, 0, 0)
@@ -242,6 +246,7 @@ class TitledCard(Card):
         self._grid.addWidget(widget, self._row + 1, column, 1, span)
         if column == 1 or span == 2:
             self._row += 2
+        return caption
 
 
 def labelled_column(title: str, value: str) -> tuple[QVBoxLayout, QLabel]:

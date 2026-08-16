@@ -65,8 +65,9 @@ class AppSettings:
     clamp_size_to_leverage: bool = True
     #: `MAX_LEVERAGE` from the specification, hard-capped there at 5.
     leverage: int = 5
+    #: Live only. `PaperBroker.set_leverage` accepts it and drops it, so the
+    #: Settings form hides it in Paper rather than offer a choice nothing acts on.
     margin_mode: MarginMode = MarginMode.ISOLATED
-    max_concurrent_positions: int = 1
     #: Superseded by `daily_loss_limit_pct` and kept only so a config saved before
     #: it existed does not silently lose its limit — losing protection quietly is
     #: the one direction a safety setting must never move on its own.
@@ -165,8 +166,6 @@ class AppSettings:
             problems.append("Risk per trade must be greater than 0 USDC.")
         if self.leverage < 1:
             problems.append("Leverage must be at least 1x.")
-        if self.max_concurrent_positions < 1:
-            problems.append("Max concurrent positions must be at least 1.")
         if self.daily_loss_limit_usdc < 0:
             problems.append("Daily loss limit cannot be negative.")
         if not 0 <= self.daily_loss_limit_pct <= 0.50:

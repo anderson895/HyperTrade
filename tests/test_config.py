@@ -20,7 +20,6 @@ def test_defaults_are_the_safe_ones():
     settings = AppSettings()
     assert settings.trading_mode is TradingMode.PAPER
     assert settings.margin_mode is MarginMode.ISOLATED
-    assert settings.max_concurrent_positions == 1
     assert settings.news_blackout_enabled
 
 
@@ -81,7 +80,6 @@ def test_default_paper_settings_are_startable():
         {"slippage": 0.5},
         {"slippage": 0},
         {"news_blackout_before_min": -1},
-        {"max_concurrent_positions": 0},
         {"paper_starting_balance": 0},
     ],
 )

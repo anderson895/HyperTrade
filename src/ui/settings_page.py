@@ -368,18 +368,36 @@ class SettingsPage(QWidget):
         self.margin = QComboBox()
         self.margin.addItem("Isolated (safer)", MarginMode.ISOLATED)
         self.margin.addItem("Cross", MarginMode.CROSS)
-        card.grid_field("Margin Mode", self.margin, 1)
+        self.margin.setToolTip(
+            "Isolated caps a trade's loss at its own margin; Cross puts the whole\n"
+            "balance behind it. Sent to Hyperliquid with the leverage.\n"
+            "Live only - the paper broker does not simulate the difference."
+        )
+        # Hidden in Paper for the same reason the paper balance is hidden in Live:
+        # `PaperBroker.set_leverage` takes the margin mode and ignores it, so in
+        # Paper this is a control that controls nothing.
+        self._margin_label = card.grid_field("Margin Mode", self.margin, 1)
 
         self.balance = QDoubleSpinBox()
         self.balance.setRange(1.0, 10_000_000.0)
         self.balance.setDecimals(2)
         self.balance.setSuffix(" USDC")
-        card.grid_field("Paper Starting Balance", self.balance, 0)
+        # Hidden in Live mode, where it does nothing: the balance then comes from
+        # the exchange. Left on screen it reads as a starting stake for real money,
+        # which is the most alarming thing it could be mistaken for.
+        self._balance_label = card.grid_field("Paper Starting Balance", self.balance, 0)
 
         self.slippage = QDoubleSpinBox()
         self.slippage.setRange(0.01, 5.0)
         self.slippage.setDecimals(2)
         self.slippage.setSuffix(" %")
+        self.slippage.setToolTip(
+            "How far through the book a market-style order may be priced.\n"
+            "Hyperliquid has no market order, so this is what makes an IOC limit\n"
+            "behave like one.\n"
+            "Applies to Close position always, and to entries only when the\n"
+            "maker order below is off - a resting order sits at its own price."
+        )
         card.grid_field("Slippage Allowance", self.slippage, 1)
 
         # A percentage, not a USDC figure: an absolute limit does not travel. 2.00
@@ -622,6 +640,18 @@ class SettingsPage(QWidget):
             self._address_label, self.address, self._address_note,
             self._key_label, self._key_row, self._key_note,
         ):
+            widget.setVisible(live)
+
+        # And the mirror image: the paper balance does nothing in Live, where the
+        # balance is whatever the exchange says. Shown there it reads as a starting
+        # stake for real money.
+        for widget in (self._balance_label, self.balance):
+            widget.setVisible(not live)
+
+        # Margin mode reaches Hyperliquid with the leverage; the paper broker takes
+        # it and drops it. Offering the choice where nothing acts on it is the same
+        # fault in the other direction.
+        for widget in (self._margin_label, self.margin):
             widget.setVisible(live)
 
         advisories = self.current().advisories()
