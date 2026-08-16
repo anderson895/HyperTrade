@@ -215,16 +215,37 @@ class BotEngine:
 
         entry = self._candles[-1].close
         account = await self.broker.account_state()
+        # Both of these were wrong and made this warning describe a bot other than
+        # the one about to run: `risk_usdc` was read straight, so a percentage stake
+        # was reported as whatever the unused fixed field happened to hold, and the
+        # clamp was not passed, so a run that would cap its size was announced as one
+        # that could not trade at all.
+        requested = self.settings.risk_for(account.account_value)
         plan = plan_position(
             side=Side.LONG,
             entry_price=entry,
             stop_price=entry - distance,
-            risk_usdc=self.settings.risk_usdc,
+            risk_usdc=requested,
             equity_usdc=account.account_value,
             leverage=self.settings.leverage,
             asset=self.asset,
+            clamp_to_leverage=self.settings.clamp_size_to_leverage,
         )
+
         if not isinstance(plan, Rejection):
+            # It fits — but "fits" may mean the clamp cut it down. Saying so here is
+            # the difference between 3% and the 0.5% actually about to be staked.
+            if plan.risk_usdc < requested * 0.99:
+                message = (
+                    f"trades will be capped by the {self.settings.leverage}x limit: "
+                    f"risking about {plan.risk_usdc:,.2f} USDC "
+                    f"({plan.risk_usdc / account.account_value:.2%} of equity), not the "
+                    f"{requested:,.2f} ({requested / account.account_value:.2%}) asked "
+                    f"for. Stop distance is about {distance:,.0f} on "
+                    f"{self.settings.timeframe.label}"
+                )
+                log.warning("%s", message)
+                return message
             return None
 
         message = (
@@ -233,11 +254,11 @@ class BotEngine:
         )
         if plan.reason is RejectReason.EXCEEDS_LEVERAGE_CAP and account.account_value > 0:
             needed = minimum_leverage_for(
-                self.settings.risk_usdc, distance, entry, account.account_value
+                requested, distance, entry, account.account_value
             )
             message += (
                 f" - raise leverage to {needed}x, or lower the risk to about "
-                f"{self.settings.risk_usdc * self.settings.leverage / needed:,.2f} USDC"
+                f"{requested * self.settings.leverage / needed:,.2f} USDC"
             )
         log.warning("%s", message)
         return message

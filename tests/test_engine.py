@@ -151,8 +151,13 @@ class AtrStrategy(StubStrategy):
 async def test_settings_that_can_never_trade_are_flagged_at_start(conn):
     """Found the hard way: 5 USDC of risk at 2x on a 99 USDC account needs 373 USDC
     of notional and gets 198. Every entry is rejected, and a bot that rejects
-    everything looks exactly like a market that never signals."""
-    engine, _, broker = build(conn, risk_usdc=5.0, leverage=2)
+    everything looks exactly like a market that never signals.
+
+    Only with the clamp off - on, the trade is cut to fit and taken, which the test
+    below covers."""
+    engine, _, broker = build(
+        conn, risk_usdc=5.0, leverage=2, clamp_size_to_leverage=False
+    )
     engine.strategy = AtrStrategy(distance=845.0)
     broker.reset(99.72)
     await engine.load_history()
@@ -163,6 +168,44 @@ async def test_settings_that_can_never_trade_are_flagged_at_start(conn):
     assert "exceeds_leverage_cap" in warning
     assert "raise leverage to 4x" in warning
     assert "lower the risk to about 2.50 USDC" in warning
+
+
+async def test_the_preflight_reads_the_percentage_when_that_is_what_is_set(conn):
+    """Fourth appearance of one bug: `risk_usdc` read straight while `risk_pct` is
+    in force. Live, it announced a 5.00 USDC stake the engine was never going to
+    take, on an account staking 3% of 99.58."""
+    engine, _, broker = build(
+        conn, risk_usdc=5.0, risk_pct=0.03, leverage=2, clamp_size_to_leverage=False
+    )
+    engine.strategy = AtrStrategy(distance=845.0)
+    broker.reset(99.72)
+    await engine.load_history()
+
+    warning = await engine.check_settings_can_trade()
+
+    assert warning is not None
+    # 3% of 99.72 is 2.99. The untouched 5.00 must not appear anywhere in it.
+    assert "5.00 USDC" not in warning
+    assert "raise leverage to 3x" in warning
+
+
+async def test_the_preflight_says_capped_rather_than_impossible_when_clamping(conn):
+    """With the clamp on, a trade too big to fit is cut down and taken, not
+    refused. Announcing "cannot trade" describes a different bot - and the useful
+    number is what will actually be staked."""
+    engine, _, broker = build(
+        conn, risk_usdc=5.0, risk_pct=0.0, leverage=2, clamp_size_to_leverage=True
+    )
+    engine.strategy = AtrStrategy(distance=845.0)
+    broker.reset(99.72)
+    await engine.load_history()
+
+    warning = await engine.check_settings_can_trade()
+
+    assert warning is not None
+    assert "cannot trade" not in warning
+    assert "capped by the 2x limit" in warning
+    assert "5.00" in warning  # what was asked for is still named
 
 
 async def test_settings_that_fit_produce_no_warning(conn):
