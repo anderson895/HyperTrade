@@ -382,12 +382,21 @@ class SettingsPage(QWidget):
         self.slippage.setSuffix(" %")
         card.grid_field("Slippage Allowance", self.slippage, 1)
 
+        # A percentage, not a USDC figure: an absolute limit does not travel. 2.00
+        # USDC is a sensible circuit breaker on a 99 USDC account and halts a 1,000
+        # USDC one after three trades.
         self.daily_loss = QDoubleSpinBox()
-        self.daily_loss.setRange(0.0, 1_000_000.0)
+        self.daily_loss.setRange(0.0, 50.0)
         self.daily_loss.setDecimals(2)
-        self.daily_loss.setSuffix(" USDC")
+        self.daily_loss.setSuffix(" % of equity")
         self.daily_loss.setSpecialValueText("Off")
+        self.daily_loss.setToolTip(
+            "Stop taking new entries once the day's realised losses reach this.\n"
+            "An open position is left alone - it keeps the stop and target that\n"
+            "are already with the exchange. Resets at 00:00 UTC."
+        )
         card.grid_field("Daily Loss Limit", self.daily_loss, 0, span=2)
+        self.daily_loss_note = card.note()
 
         self.timeframe_note = card.note()
 
@@ -456,7 +465,16 @@ class SettingsPage(QWidget):
         self.leverage.setValue(settings.leverage)
         self.balance.setValue(settings.paper_starting_balance)
         self.slippage.setValue(settings.slippage * 100)
-        self.daily_loss.setValue(settings.daily_loss_limit_usdc)
+        self.daily_loss.setValue(settings.daily_loss_limit_pct * 100)
+        # A config saved before this was a percentage still has its fixed limit in
+        # force. Say so, rather than showing "Off" over a limit that is running.
+        self.daily_loss_note.setText(
+            f"A fixed limit of {settings.daily_loss_limit_usdc:,.2f} USDC is in "
+            f"force from an earlier version. Saving replaces it with the percentage "
+            f"above."
+            if settings.daily_loss_limit_usdc > 0 and not settings.daily_loss_limit_pct
+            else ""
+        )
         self.news_block.setChecked(settings.economic_data_day_block)
         self.news_auto.setChecked(settings.news_blackout_enabled)
         self.news_before.setValue(settings.news_blackout_before_min)
@@ -500,7 +518,10 @@ class SettingsPage(QWidget):
         settings.leverage = self.leverage.value()
         settings.paper_starting_balance = self.balance.value()
         settings.slippage = self.slippage.value() / 100
-        settings.daily_loss_limit_usdc = self.daily_loss.value()
+        # The percentage is authoritative once saved, so the legacy fixed limit is
+        # cleared rather than left behind to take over if the percentage is zeroed.
+        settings.daily_loss_limit_pct = self.daily_loss.value() / 100
+        settings.daily_loss_limit_usdc = 0.0
         settings.economic_data_day_block = self.news_block.isChecked()
         settings.news_blackout_enabled = self.news_auto.isChecked()
         settings.news_blackout_before_min = self.news_before.value()

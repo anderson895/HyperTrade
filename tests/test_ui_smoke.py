@@ -119,7 +119,7 @@ def test_settings_round_trip_through_the_widgets(qapp):
         leverage=7,
         margin_mode=MarginMode.CROSS,
         paper_starting_balance=2_500.0,
-        daily_loss_limit_usdc=75.0,
+        daily_loss_limit_pct=0.075,
         economic_data_day_block=True,
     )
     page = SettingsPage(AppSettings())
@@ -336,7 +336,7 @@ def test_every_settings_field_reaches_the_settings_object(qapp):
         leverage=7,
         margin_mode=MarginMode.CROSS,
         slippage=0.02,
-        daily_loss_limit_usdc=12.0,
+        daily_loss_limit_pct=0.12,
         take_profit_rr=3.5,
         stop_buffer_pct=0.006,
         trailing_enabled=True,
@@ -357,6 +357,9 @@ def test_every_settings_field_reaches_the_settings_object(qapp):
         "trading_mode", "network", "account_address", "coin",
         "paper_starting_balance", "max_concurrent_positions", "risk_pct",
         "clamp_size_to_leverage",
+        # Legacy. The form edits `daily_loss_limit_pct` and clears this on save, so
+        # a zeroed percentage cannot hand control back to an old fixed limit.
+        "daily_loss_limit_usdc",
     }
     for name in sorted(editable):
         assert getattr(round_tripped, name) == pytest.approx(

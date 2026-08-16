@@ -67,7 +67,21 @@ class AppSettings:
     leverage: int = 5
     margin_mode: MarginMode = MarginMode.ISOLATED
     max_concurrent_positions: int = 1
+    #: Superseded by `daily_loss_limit_pct` and kept only so a config saved before
+    #: it existed does not silently lose its limit — losing protection quietly is
+    #: the one direction a safety setting must never move on its own.
     daily_loss_limit_usdc: float = 0.0  # 0 disables the limit
+    #: The same circuit breaker as a fraction of equity, which is what the Settings
+    #: form edits. A fixed USDC figure does not travel: 2.00 is a sensible breaker
+    #: on a 99 USDC account and halts a 1,000 USDC one after three trades.
+    #:
+    #: Not in the specification — it adds nothing to the strategy and takes nothing
+    #: away. It only refuses *new* entries once the day's realised losses pass the
+    #: line; sizing, stops, targets and the signal itself are untouched, and an open
+    #: position keeps the exits already lodged with the exchange. The one thing to
+    #: know is that a backtest has no such limit, so a halted day is a day the
+    #: backtest would have gone on trading.
+    daily_loss_limit_pct: float = 0.02
 
     # --- exits ---
     #: Target as a multiple of the stop distance. 2.0 means a 1:2 risk to reward:
@@ -126,6 +140,16 @@ class AppSettings:
         """
         return equity_usdc * self.risk_pct if self.risk_pct else self.risk_usdc
 
+    def daily_loss_limit_for(self, equity_usdc: float) -> float:
+        """How much may be lost today before entries stop. 0 means no limit.
+
+        The percentage wins when it is set, so a legacy fixed limit stays in force
+        only until one is chosen — never the other way round.
+        """
+        if self.daily_loss_limit_pct:
+            return equity_usdc * self.daily_loss_limit_pct
+        return self.daily_loss_limit_usdc
+
     def validate(self, *, has_agent_key: bool = False) -> list[str]:
         """Problems that must be fixed before the bot can start, in plain language.
 
@@ -145,6 +169,8 @@ class AppSettings:
             problems.append("Max concurrent positions must be at least 1.")
         if self.daily_loss_limit_usdc < 0:
             problems.append("Daily loss limit cannot be negative.")
+        if not 0 <= self.daily_loss_limit_pct <= 0.50:
+            problems.append("Daily loss limit must be between 0% and 50% of equity.")
         if not 0 < self.slippage <= 0.05:
             problems.append("Slippage must be between 0% and 5%.")
         if self.news_blackout_before_min < 0 or self.news_blackout_after_min < 0:

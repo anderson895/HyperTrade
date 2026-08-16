@@ -17,4 +17,8 @@ build/
 dist/
 *.spec.bak
 credentials.txt
+
+# The client's specification and the internal development guide. Deliberately out
+# of a public repository: README.md reproduces every rule they set, so nothing a
+# reader needs is behind this line.
 /development_guide/

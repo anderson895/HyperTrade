@@ -400,8 +400,7 @@ async def test_close_now_is_the_explicit_way_out(conn):
 # --- daily loss limit -----------------------------------------------------
 
 
-async def test_the_daily_loss_limit_halts_new_entries(conn):
-    engine, info, broker = build(conn, signal=LONG_SIGNAL, daily_loss_limit_usdc=40.0)
+def _record_loss(conn, amount: float) -> None:
     record_fill(
         conn,
         TradingMode.PAPER,
@@ -413,9 +412,16 @@ async def test_the_daily_loss_limit_halts_new_entries(conn):
             price=62_000.0,
             fee=0.0,
             reason=FillReason.STOP_LOSS,
-            realised_pnl=-50.0,  # already past the 40 USDC limit
+            realised_pnl=-amount,
         ),
     )
+
+
+async def test_the_daily_loss_limit_halts_new_entries(conn):
+    engine, info, broker = build(
+        conn, signal=LONG_SIGNAL, daily_loss_limit_pct=0.0, daily_loss_limit_usdc=40.0
+    )
+    _record_loss(conn, 50.0)  # already past the 40 USDC limit
 
     await engine.prepare()
     info.candles.extend(make_candles(6)[-1:])
@@ -425,9 +431,77 @@ async def test_the_daily_loss_limit_halts_new_entries(conn):
 
 
 async def test_trading_continues_while_under_the_limit(conn):
-    engine, info, broker = build(conn, signal=LONG_SIGNAL, daily_loss_limit_usdc=500.0)
+    engine, info, broker = build(
+        conn, signal=LONG_SIGNAL, daily_loss_limit_pct=0.0, daily_loss_limit_usdc=500.0
+    )
     await engine.prepare()
     info.candles.extend(make_candles(6)[-1:])
     await engine.tick()
 
     assert await broker.managed_position() is not None
+
+
+async def test_a_percentage_limit_is_read_against_equity(conn):
+    """The whole point of the change: 2% has to mean 2% of whatever the account is
+    worth, not a number frozen at the time it was typed."""
+    engine, info, broker = build(conn, signal=LONG_SIGNAL, daily_loss_limit_pct=0.02)
+    broker.reset(1_000.0)  # 2% = 20 USDC
+    _record_loss(conn, 25.0)
+
+    await engine.prepare()
+    info.candles.extend(make_candles(6)[-1:])
+    await engine.tick()
+
+    assert await broker.managed_position() is None
+
+
+async def test_the_same_percentage_allows_the_same_loss_on_a_bigger_account(conn):
+    """25 USDC stops a 1,000 USDC account at 2% and does not stop a 10,000 one.
+    A fixed USDC limit could not tell the two apart, which is why it was replaced."""
+    engine, info, broker = build(conn, signal=LONG_SIGNAL, daily_loss_limit_pct=0.02)
+    broker.reset(10_000.0)  # 2% = 200 USDC
+    _record_loss(conn, 25.0)
+
+    await engine.prepare()
+    info.candles.extend(make_candles(6)[-1:])
+    await engine.tick()
+
+    assert await broker.managed_position() is not None
+
+
+async def test_the_percentage_wins_over_a_legacy_fixed_limit(conn):
+    """A config saved before the percentage existed keeps its fixed limit only
+    until one is chosen - never the other way round."""
+    engine, info, broker = build(
+        conn, signal=LONG_SIGNAL, daily_loss_limit_pct=0.02, daily_loss_limit_usdc=1.0
+    )
+    broker.reset(1_000.0)  # the fixed 1.00 would halt; 2% of 1,000 does not
+    _record_loss(conn, 5.0)
+
+    await engine.prepare()
+    info.candles.extend(make_candles(6)[-1:])
+    await engine.tick()
+
+    assert await broker.managed_position() is not None
+
+
+async def test_the_limit_never_touches_an_open_position(conn):
+    """It refuses new entries and nothing else. Closing a position on a daily limit
+    would realise a loss the stop might never have taken - and it would be a change
+    to the strategy, which this feature is not allowed to be."""
+    engine, info, broker = build(conn, signal=LONG_SIGNAL, daily_loss_limit_pct=0.02)
+    await engine.prepare()
+    info.candles.extend(make_candles(6)[-1:])
+    await engine.tick()
+
+    held = await broker.managed_position()
+    assert held is not None
+
+    _record_loss(conn, 500.0)  # blows through any limit
+    info.candles.extend(make_candles(7)[-1:])
+    await engine.tick()
+
+    still_held = await broker.managed_position()
+    assert still_held is not None
+    assert still_held.stop_price == held.stop_price
+    assert still_held.take_profit_price == held.take_profit_price

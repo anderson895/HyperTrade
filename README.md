@@ -271,6 +271,27 @@ held back.
 Beside it is a manual override — `No new trades today (economic data day)` — for when you know
 something the calendar does not.
 
+### The daily loss limit
+
+A circuit breaker, set as a **percentage of equity** and defaulting to **2%**. Once the day's
+realised losses reach it, no new entries are taken until 00:00 UTC.
+
+It is measured against equity *now*, not equity at midnight, so it tightens as the account
+shrinks — the same way `risk_pct` does, and for the same reason: a percentage that compounds one
+way and not the other is not a percentage.
+
+**It is not part of the strategy specification**, and it is careful not to become one. It refuses
+new entries and does nothing else: sizing, stops, targets and the signal are untouched, and an
+open position keeps the exits already lodged with the exchange. Closing on a daily limit would
+realise a loss the stop might never have taken.
+
+The one thing to know is that a backtest has no such limit, so a halted day is a day the backtest
+would have gone on trading. At the shipped settings the limit is roughly three losing trades, and
+the strategy averages about one signal every day and a half — so it should be rare, and when it
+fires something is worth looking at.
+
+Set it to `Off` to disable it.
+
 **STOP BOT does not close an open position.** It stops looking for entries and leaves the position
 with its stop and target in place. Use **Close position** to flatten.
 
@@ -470,7 +491,10 @@ collapsible icon sidebar, page stack, bottom bar — in a teal palette instead o
   withdraw, and `usdClassTransfer` is a user-signed action an agent cannot perform either. The main
   wallet key is never entered here.
 - `data/` and `venv/` are gitignored. Secrets are in Windows Credential Manager, not on disk.
-- Set a **daily loss limit** before leaving the bot unattended. It defaults to off.
+- The **daily loss limit** defaults to **2% of equity** and is a percentage on purpose: a
+  fixed USDC figure does not travel, and 2.00 USDC is a sensible circuit breaker on a 99 USDC
+  account while halting a 1,000 USDC one after three trades. See below for what it does and
+  does not do.
 - Live mode should first be exercised on **testnet**, then at a stake you would not mind losing.
 
 ## Copyright

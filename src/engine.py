@@ -490,7 +490,7 @@ class BotEngine:
         news = await self._news_blocker()
         if news:
             return news
-        return self._daily_loss_blocker()
+        return await self._daily_loss_blocker()
 
     async def _news_blocker(self) -> str | None:
         """Whether a high-impact release is close enough to stand aside for.
@@ -516,9 +516,26 @@ class BotEngine:
             log.warning("no entries while the economic calendar is unreadable: %s", exc)
             return "economic calendar unavailable - standing aside"
 
-    def _daily_loss_blocker(self) -> str | None:
-        limit = self.settings.daily_loss_limit_usdc
-        if limit <= 0 or self.conn is None:
+    async def _daily_loss_blocker(self) -> str | None:
+        """Stop entering after a bad enough day. Nothing else changes.
+
+        The limit is read against equity *now* rather than at midnight, so it
+        tightens as the account shrinks — the same way `risk_pct` does, and for the
+        same reason: a percentage that compounds one way and not the other is not a
+        percentage. Positions already open are not touched; they keep the stop and
+        target that are with the exchange.
+        """
+        if self.conn is None:
+            return None
+
+        # Only ask the exchange what the account is worth if a percentage is what
+        # is configured — a fixed limit needs no equity, and a legacy config that
+        # sets one should not start making network calls because of this.
+        equity = 0.0
+        if self.settings.daily_loss_limit_pct:
+            equity = (await self.broker.account_state()).account_value
+        limit = self.settings.daily_loss_limit_for(equity)
+        if limit <= 0:
             return None
 
         realised = realised_since(self.conn, self.broker.mode, _utc_midnight_ms())
@@ -528,9 +545,17 @@ class BotEngine:
 
         if not self._halted_for_the_day:
             self._halted_for_the_day = True
+            # Name the percentage as well as the money, or a limit that moves with
+            # equity reads as a different limit every time it is hit.
+            of_equity = (
+                f" ({self.settings.daily_loss_limit_pct:.2%} of {equity:,.2f})"
+                if self.settings.daily_loss_limit_pct
+                else ""
+            )
             log.warning(
-                "daily loss limit reached: %.2f USDC lost today against a %.2f limit. "
-                "No more entries until 00:00 UTC.",
-                -realised, limit,
+                "daily loss limit reached: %.2f USDC lost today against a %.2f limit%s. "
+                "No more entries until 00:00 UTC. Any open position keeps its stop "
+                "and target.",
+                -realised, limit, of_equity,
             )
         return f"daily loss limit reached ({-realised:.2f} of {limit:.2f} USDC)"
