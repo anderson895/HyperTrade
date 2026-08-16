@@ -5,14 +5,6 @@ importing the package — `available()` is then complete for the Settings dropdo
 """
 
 from .base import Strategy, available, create, register
-from .trend_following import TrendFollowing
 from .volume_rejection import VolumeRejection
 
-__all__ = [
-    "Strategy",
-    "TrendFollowing",
-    "VolumeRejection",
-    "available",
-    "create",
-    "register",
-]
+__all__ = ["Strategy", "VolumeRejection", "available", "create", "register"]

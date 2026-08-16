@@ -154,8 +154,10 @@ class BotController(QObject):
             await self.session.apply_settings(settings)
             self._warn_if_live_refused()
         log.info(
-            "settings saved: %s %s, risk %g USDC, %dx %s",
-            settings.coin, settings.timeframe.label, settings.risk_usdc,
+            "settings saved: %s %s, %s, risk %s, %dx %s",
+            settings.coin, settings.timeframe.label, settings.strategy,
+            f"{settings.risk_pct:.2%} of equity" if settings.risk_pct
+            else f"{settings.risk_usdc:g} USDC",
             settings.leverage, settings.margin_mode.value,
         )
         for note in settings.advisories():

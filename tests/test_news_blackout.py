@@ -301,8 +301,11 @@ def build(conn, calendar, **overrides):
     settings = AppSettings(
         timeframe=Timeframe.H1,
         risk_usdc=50.0,
+        risk_pct=0.0,  # fixed stake: these tests assert on entries, not on size
         leverage=5,
         paper_starting_balance=1_000.0,
+        # "An entry was taken" has to mean filled, not resting on the book.
+        post_only_entry=False,
     )
     for key, value in overrides.items():
         setattr(settings, key, value)

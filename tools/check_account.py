@@ -24,7 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from src import secrets_store  # noqa: E402
 from src.config import load_settings  # noqa: E402
-from src.core.indicators import atr  # noqa: E402
+from src.strategy import create  # noqa: E402
 from src.core.models import Network, Side, Timeframe  # noqa: E402
 from src.core.sizing import Rejection, plan_position  # noqa: E402
 from src.data.hl_info import HyperliquidInfo  # noqa: E402
@@ -44,13 +44,22 @@ async def check(args) -> int:
 
     network = Network(args.network) if args.network else settings.network
     address = args.address or settings.account_address
-    risk = args.risk if args.risk is not None else settings.risk_usdc
     leverage = args.leverage if args.leverage is not None else settings.leverage
     timeframe = Timeframe(args.timeframe) if args.timeframe else settings.timeframe
+    # `risk` is resolved once equity is known: a percentage setting has no fixed
+    # USDC value. Reading `risk_usdc` directly reported the wrong size for every
+    # percentage config — on a check whose entire job is to say what will happen.
+    risk_override = args.risk
 
     print(f"network   : {network.value}")
     print(f"address   : {address or '(none)'}")
-    print(f"settings  : {timeframe.label}, risk {risk} USDC, {leverage}x\n")
+    risk_text = (
+        f"risk {risk_override} USDC" if risk_override is not None
+        else f"risk {settings.risk_pct:.1%} of equity" if settings.risk_pct
+        else f"risk {settings.risk_usdc} USDC"
+    )
+    print(f"settings  : {timeframe.label}, {settings.strategy}, {risk_text}, "
+          f"{leverage}x {settings.margin_mode.value}\n")
 
     failures = 0
 
@@ -114,15 +123,23 @@ async def check(args) -> int:
 
         # --- can these settings produce a trade? ---------------------------
         asset = await info.asset_meta(settings.coin)
-        candles = await info.recent_candles(settings.coin, timeframe, 60)
-        current = atr(candles[:-1], 14)[-1]
-        if current and state.account_value > 0:
-            distance = 2 * current
+        candles = await info.recent_candles(settings.coin, timeframe, 200)
+        # Ask the configured strategy how far its stop sits, rather than assuming
+        # 2xATR: volume rejection puts its stop past a rejection wick, and sizing
+        # against the wrong distance answers a question about a different bot.
+        strategy = create(settings.strategy)
+        distance = strategy.typical_stop_distance(candles[:-1])
+        if distance and state.account_value > 0:
+            risk = (
+                risk_override if risk_override is not None
+                else settings.risk_for(state.account_value)
+            )
             entry = candles[-1].close
             plan = plan_position(
                 side=Side.LONG, entry_price=entry, stop_price=entry - distance,
                 risk_usdc=risk, equity_usdc=state.account_value,
                 leverage=leverage, asset=asset,
+                clamp_to_leverage=settings.clamp_size_to_leverage,
             )
             if isinstance(plan, Rejection):
                 line(BAD, f"these settings cannot trade: {plan}")
@@ -133,11 +150,21 @@ async def check(args) -> int:
                     f"a trade would be {plan.size:g} {settings.coin} "
                     f"({plan.notional:,.0f} USDC notional, {plan.margin_required:,.0f} margin)",
                 )
-        elif current:
+                if plan.risk_usdc < risk * 0.99:
+                    line(
+                        WARN,
+                        f"the {leverage}x cap trims that trade to "
+                        f"{plan.risk_usdc:.2f} USDC of risk "
+                        f"({plan.risk_usdc / state.account_value:.2%} of equity), "
+                        f"not the {risk:.2f} ({risk / state.account_value:.1%}) asked for",
+                    )
+        elif state.account_value > 0:
+            line(WARN, f"{settings.strategy} cannot estimate a stop distance yet")
+        else:
             line(WARN, "cannot check the settings until the perps wallet is funded")
 
         if timeframe in (Timeframe.M5, Timeframe.M15):
-            line(WARN, f"{timeframe.label} backtested at a loss - see SKILL.md")
+            line(WARN, f"{timeframe.label} backtested at a loss - see README.md")
 
     print()
     if failures:

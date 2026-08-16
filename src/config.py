@@ -18,10 +18,16 @@ from .strategy import available
 ADDRESS_RE = re.compile(r"^0x[0-9a-fA-F]{40}$")
 PRIVATE_KEY_RE = re.compile(r"^0x[0-9a-fA-F]{64}$")
 
-#: Timeframes that backtested at a clear loss for the shipped strategy
-#: (−0.905R and −0.395R per trade; see the evidence table in SKILL.md). They stay
-#: selectable because the spec asks for all seven, but the user is warned first.
-DISCOURAGED_TIMEFRAMES = frozenset({Timeframe.M5, Timeframe.M15})
+#: Timeframes where the strategy as specified backtested at a clear loss on a
+#: sample big enough to read (measured 2026-08-16, 4.5bps): 5m −0.316R, 15m
+#: −0.448R, 30m −0.293R, 4h −0.399R. 15m stays the default because the spec names
+#: it, so the warning fires on a fresh install — that is deliberate. Not listed:
+#: 1h (−0.066R, near enough to zero to be undecided) and 1d (+0.484R on 12 trades,
+#: too few to mean anything). Absence here is "not proven bad", not "good".
+#: See the evidence table in README.md.
+DISCOURAGED_TIMEFRAMES = frozenset(
+    {Timeframe.M5, Timeframe.M15, Timeframe.M30, Timeframe.H4}
+)
 
 
 @dataclass
@@ -35,19 +41,30 @@ class AppSettings:
 
     # --- trading ---
     coin: str = "BTC"
-    # 4h backtested strongest of the seven, on the most history. See SKILL.md.
-    timeframe: Timeframe = Timeframe.H4
+    # 15m because the specification is called "The 15-Minute Volume Rejection
+    # Strategy" and names 96 candles as 24 hours. It is also the timeframe that
+    # backtests worst, so `advisories()` warns every time it is started — the
+    # default matches what was asked for, and the warning carries what was
+    # measured. Overriding it silently would leave the app trading something the
+    # spec never described.
+    timeframe: Timeframe = Timeframe.M15
     #: Registry key, not a class — a renamed strategy would orphan saved configs.
-    strategy: str = "trend_following"
+    strategy: str = "volume_rejection"
     risk_usdc: float = 5.0
     #: When above 0 this replaces `risk_usdc`: risk becomes this fraction of equity,
     #: recomputed per trade, so the stake grows and shrinks with the account.
-    risk_pct: float = 0.0
+    #: 3% is `ACCOUNT_RISK_PCT` from the specification.
+    risk_pct: float = 0.03
     #: Cut the size down to what the leverage allows instead of refusing the trade.
     #: See `plan_position` — a tight stop can need more notional than any account
-    #: can hold, and a strategy backtested with a clamp measured the clamped size.
-    clamp_size_to_leverage: bool = False
-    leverage: int = 2
+    #: can hold. On by default because the specification sizes the same way:
+    #: `min(risk_amount / sl_dist_pct, equity * MAX_LEVERAGE)` is this clamp.
+    #: Worth knowing what it means at 3% and 5x — a 0.38% stop wants 7.9x, so the
+    #: clamp binds on most signals and the real risk taken is nearer 0.6% than 3%.
+    #: The engine logs the reduction every time rather than letting it pass silently.
+    clamp_size_to_leverage: bool = True
+    #: `MAX_LEVERAGE` from the specification, hard-capped there at 5.
+    leverage: int = 5
     margin_mode: MarginMode = MarginMode.ISOLATED
     max_concurrent_positions: int = 1
     daily_loss_limit_usdc: float = 0.0  # 0 disables the limit
@@ -57,14 +74,15 @@ class AppSettings:
     #: stop 1,000 below a 60,000 entry puts the target at 62,000.
     take_profit_rr: float = 2.0
     #: Move the stop up behind the trade to lock in profit as it runs.
-    #: Off by default on purpose. A saved config predates this field and would
-    #: silently inherit whatever it defaults to — and switching it on would change
-    #: the exits of a strategy that was backtested without it.
-    trailing_enabled: bool = False
-    #: Profit, in multiples of the stop distance, before trailing starts. 0 means
-    #: as soon as the trailing stop would sit better than the original — which is
-    #: what the reference implementation actually did, whatever its config said.
-    trailing_activation_rr: float = 0.0
+    #: `ENABLE_TRAILING_STOP = True` in the specification.
+    trailing_enabled: bool = True
+    #: Profit, in multiples of the stop distance, before trailing starts.
+    #: `TRAILING_ACTIVATION_RR = 1.0` in the specification. Note that the reference
+    #: script declares that constant and then never reads it — it trails from the
+    #: first tick of profit. The written instruction is followed here rather than
+    #: the code that contradicts it, and it is also the safer of the two: trailing
+    #: from tick one tightens the stop into ordinary noise.
+    trailing_activation_rr: float = 1.0
     #: How far the trailing stop sits behind the best price reached.
     trailing_distance_pct: float = 0.004
     #: How far past the rejection wick the volume-rejection stop sits.
@@ -87,9 +105,13 @@ class AppSettings:
     slippage: float = 0.01  # IOC limit orders are priced this far through the book
     #: Rest a maker order at the signal price instead of crossing the spread. Pays
     #: the maker fee and only trades when price comes back — which is itself a
-    #: filter, and one a backtest built on maker fills has already counted.
-    post_only_entry: bool = False
+    #: filter. On by default: the specification says "places a Post-Only (ALO)
+    #: limit order at the candle close", and it is the only entry style it names.
+    post_only_entry: bool = True
     #: Candles a resting entry may wait before it is cancelled as stale.
+    #: The specification says 30 minutes, which is 2 candles at its 15m timeframe.
+    #: Counted in candles rather than minutes so it still means "two bars" if the
+    #: timeframe is changed.
     entry_expiry_candles: int = 2
 
     @property
@@ -178,7 +200,7 @@ class AppSettings:
         if self.timeframe in DISCOURAGED_TIMEFRAMES:
             notes.append(
                 f"{self.timeframe.label} backtested at a loss for this strategy "
-                f"(see SKILL.md). Run it in Paper mode before risking real money."
+                f"(see README.md). Run it in Paper mode before risking real money."
             )
         return notes
 

@@ -124,12 +124,15 @@ def plan_position(
     for us — otherwise the stop is decorative and the real risk is the whole margin.
 
     `clamp_to_leverage` cuts the size down to what the leverage allows instead of
-    refusing the trade. Off by default, because a silently resized trade is not the
-    trade the user asked for. It exists because a tight stop makes the requested
-    risk need more notional than the account can hold — a 0.18% stop and 3% risk
-    needs 17x, whatever the balance — and a strategy backtested that way is
-    measuring the clamped size, not the requested one. `PositionPlan.risk_usdc`
-    always reports what is genuinely at stake, so the caller can say so.
+    refusing the trade. Off *here* and switched on by `AppSettings`, because the
+    default belongs to the strategy being run and not to this function: a silently
+    resized trade is not the trade the caller asked for, so the caller has to opt in
+    and then say so. It exists because a tight stop makes the requested risk need
+    more notional than the account can hold — a 0.18% stop and 3% risk needs 17x,
+    whatever the balance. A strategy backtested that way measured the clamped size,
+    not the requested one, which is why the shipped settings clamp: the
+    specification sizes with `min(risk / stop_pct, equity * MAX_LEVERAGE)`.
+    `PositionPlan.risk_usdc` always reports what is genuinely at stake.
     """
     if entry_price <= 0 or stop_price <= 0:
         return Rejection(

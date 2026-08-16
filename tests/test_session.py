@@ -58,15 +58,15 @@ def live_settings() -> AppSettings:
 
 
 async def test_the_chosen_strategy_is_the_one_that_runs(conn):
-    """Regression: session.py hardcoded TrendFollowing, so a second strategy could
-    be written, registered and selected while the bot went on trading the first."""
-    from src.strategy import TrendFollowing, VolumeRejection
+    """Regression: session.py hardcoded its strategy, so one could be written,
+    registered and selected while the bot went on trading another. A live account
+    was started on the wrong system before this was wired up."""
+    from src.strategy import VolumeRejection
 
     session = await build(conn, AppSettings(strategy="volume_rejection"))
-    assert isinstance(session.engine.strategy, VolumeRejection)
 
-    session = await build(conn, AppSettings(strategy="trend_following"))
-    assert isinstance(session.engine.strategy, TrendFollowing)
+    assert isinstance(session.engine.strategy, VolumeRejection)
+    assert session.engine.strategy.name == "volume_rejection"
 
 
 async def test_the_take_profit_setting_reaches_the_strategy(conn):
@@ -74,12 +74,6 @@ async def test_the_take_profit_setting_reaches_the_strategy(conn):
         conn, AppSettings(strategy="volume_rejection", take_profit_rr=3.0)
     )
     assert session.engine.strategy.take_profit_rr == 3.0
-
-    # The trend follower calls the same idea `reward_risk`.
-    session = await build(
-        conn, AppSettings(strategy="trend_following", take_profit_rr=1.5)
-    )
-    assert session.engine.strategy.reward_risk == 1.5
 
 
 async def test_the_stop_buffer_reaches_the_strategy_that_has_one(conn):
@@ -89,17 +83,42 @@ async def test_the_stop_buffer_reaches_the_strategy_that_has_one(conn):
     assert session.engine.strategy.stop_buffer == 0.005
 
 
+async def test_only_parameters_the_strategy_declares_are_passed(conn):
+    """A strategy that does not take one of the exit settings must still build.
+    The alternative is a TypeError at startup every time a setting is added for
+    one strategy and not another."""
+    from src.strategy.base import Strategy, _REGISTRY
+
+    class Spartan(Strategy):
+        name = "spartan"
+        display_name = "takes nothing"
+
+        @property
+        def warmup_candles(self) -> int:
+            return 1
+
+        def evaluate(self, candles):
+            return None
+
+    _REGISTRY["spartan"] = Spartan
+    try:
+        session = await build(conn, AppSettings(strategy="spartan"))
+        assert isinstance(session.engine.strategy, Spartan)
+    finally:
+        del _REGISTRY["spartan"]
+
+
 async def test_an_unknown_saved_strategy_falls_back_loudly(conn, caplog):
     """A config naming a strategy this build no longer has must not stop the app -
     but it must not quietly trade something the user did not choose either."""
     import logging
 
-    from src.strategy import TrendFollowing
+    from src.session import DEFAULT_STRATEGY
 
     with caplog.at_level(logging.ERROR):
         session = await build(conn, AppSettings(strategy="no_such_strategy"))
 
-    assert isinstance(session.engine.strategy, TrendFollowing)
+    assert session.engine.strategy.name == DEFAULT_STRATEGY
     assert "no_such_strategy" in caplog.text
     assert "falling back" in caplog.text
 

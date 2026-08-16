@@ -136,12 +136,15 @@ def test_every_requested_timeframe_is_offered(qapp):
 
 
 def test_loss_making_timeframes_are_flagged(qapp):
+    """4h is on this list from measurement, not intuition: it backtested at
+    -0.399R, worse than 5m. A slow timeframe is not a safe one."""
     page = SettingsPage(AppSettings())
-    page.load(AppSettings(timeframe=Timeframe.M5))
-    assert page.timeframe_note.isVisibleTo(page)
-    assert "backtested at a loss" in page.timeframe_note.text()
+    for losing in (Timeframe.M5, Timeframe.M15, Timeframe.M30, Timeframe.H4):
+        page.load(AppSettings(timeframe=losing))
+        assert page.timeframe_note.isVisibleTo(page), losing
+        assert "backtested at a loss" in page.timeframe_note.text()
 
-    page.load(AppSettings(timeframe=Timeframe.H4))
+    page.load(AppSettings(timeframe=Timeframe.H1))
     assert not page.timeframe_note.isVisibleTo(page)
 
 
@@ -288,6 +291,77 @@ def test_the_exit_settings_round_trip(qapp):
     assert settings.trailing_distance_pct == pytest.approx(0.008)
 
 
+def test_the_post_only_entry_settings_round_trip(qapp):
+    """Regression: post_only_entry was persisted and read by the engine but had no
+    widget, so the one setting the user's specification depends on could not be
+    switched on from the app at all."""
+    page = SettingsPage(AppSettings())
+    page.load(AppSettings(post_only_entry=True, entry_expiry_candles=4))
+
+    assert page.post_only.isChecked()
+    assert page.entry_expiry.value() == 4
+
+    settings = page.current()
+    assert settings.post_only_entry
+    assert settings.entry_expiry_candles == 4
+
+
+def test_the_expiry_greys_out_when_entries_cross_the_spread(qapp):
+    """Nothing rests, so nothing can expire."""
+    page = SettingsPage(AppSettings())
+
+    page.post_only.setChecked(False)
+    assert not page.entry_expiry.isEnabled()
+
+    page.post_only.setChecked(True)
+    assert page.entry_expiry.isEnabled()
+
+
+def test_every_settings_field_reaches_the_settings_object(qapp):
+    """A field the form shows but never writes back is worse than no field: it
+    looks configured and is not. Caught post_only_entry, which had no widget."""
+    import dataclasses
+
+    page = SettingsPage(AppSettings())
+    # Deliberately different from every default, so a field that is not written
+    # back shows up as unchanged.
+    changed = AppSettings(
+        strategy="volume_rejection",
+        timeframe=Timeframe.M5,
+        risk_usdc=3.25,
+        leverage=7,
+        margin_mode=MarginMode.CROSS,
+        slippage=0.02,
+        daily_loss_limit_usdc=12.0,
+        take_profit_rr=3.5,
+        stop_buffer_pct=0.006,
+        trailing_enabled=True,
+        trailing_activation_rr=1.5,
+        trailing_distance_pct=0.007,
+        post_only_entry=True,
+        entry_expiry_candles=5,
+        news_blackout_enabled=False,
+        news_blackout_before_min=45,
+        news_blackout_after_min=20,
+        economic_data_day_block=True,
+    )
+    page.load(changed)
+    round_tripped = page.current()
+
+    editable = {field.name for field in dataclasses.fields(changed)} - {
+        # Not on this form by design.
+        "trading_mode", "network", "account_address", "coin",
+        "paper_starting_balance", "max_concurrent_positions", "risk_pct",
+        "clamp_size_to_leverage",
+    }
+    for name in sorted(editable):
+        assert getattr(round_tripped, name) == pytest.approx(
+            getattr(changed, name)
+        ) if isinstance(getattr(changed, name), float) else getattr(
+            round_tripped, name
+        ) == getattr(changed, name), f"{name} did not survive the round trip"
+
+
 def test_the_trailing_fields_grey_out_when_trailing_is_off(qapp):
     page = SettingsPage(AppSettings())
 
@@ -298,32 +372,20 @@ def test_the_trailing_fields_grey_out_when_trailing_is_off(qapp):
     assert page.trail_distance.isEnabled()
 
 
-def test_the_stop_buffer_only_applies_to_the_strategy_that_has_one(qapp):
-    """The trend follower measures its stop from ATR - there is no wick to buffer,
-    and a live-looking field that does nothing is worse than a greyed one."""
-    page = SettingsPage(AppSettings())
-
-    page.load(AppSettings(strategy="volume_rejection"))
+def test_the_stop_buffer_is_offered_to_a_strategy_that_takes_one(qapp):
+    """Which fields are live is read off the strategy's constructor, so a field
+    that reaches nothing is greyed rather than looking editable."""
+    page = SettingsPage(AppSettings(strategy="volume_rejection"))
     assert page.stop_buffer.isEnabled()
-
-    page.load(AppSettings(strategy="trend_following"))
-    assert not page.stop_buffer.isEnabled()
 
 
 def test_the_strategy_note_is_right_from_the_moment_the_page_opens(qapp):
     """Regression: the note and the greying were only refreshed when the dropdown
-    was touched, so a page opened on a saved strategy described nothing and left
-    Stop Buffer looking editable for a strategy that has no wick to buffer."""
-    page = SettingsPage(AppSettings(strategy="trend_following"))
+    was touched, so a page opened on a saved strategy described nothing at all."""
+    page = SettingsPage(AppSettings(strategy="volume_rejection"))
 
     assert page.strategy_note.text()
-    assert "ATR" in page.strategy_note.text()
-    assert not page.stop_buffer.isEnabled()
-
-    fresh = SettingsPage(AppSettings(strategy="volume_rejection"))
-
-    assert "breakout" in fresh.strategy_note.text().lower()
-    assert fresh.stop_buffer.isEnabled()
+    assert "breakout" in page.strategy_note.text().lower()
 
 
 def test_the_news_blackout_settings_round_trip(qapp):
@@ -406,11 +468,29 @@ def test_valid_settings_are_emitted_on_save(qapp):
     emitted = []
     page.saved.connect(emitted.append)
 
+    page.risk_unit.setCurrentIndex(0)  # USDC
     page.risk.setValue(25.0)
     page.button_save.click()
 
     assert len(emitted) == 1
     assert emitted[0].risk_usdc == 25.0
+    assert emitted[0].risk_pct == 0.0  # the unit chosen is the unit that applies
+
+
+def test_the_risk_unit_opens_on_the_percentage_the_spec_asks_for(qapp):
+    """The default is 3% of equity, so the page must open on "% of equity" with 3
+    in the box. Opening on USDC would show "5.00" beside a bot staking 3% - which
+    is exactly the mismatch that had the bottom bar reading 0.10 USDC while the
+    engine risked 0.30% of the account."""
+    page = SettingsPage(AppSettings())
+
+    assert page.risk_unit.currentData() == "pct"
+    assert page.risk.value() == pytest.approx(3.0)
+
+    emitted = []
+    page.saved.connect(emitted.append)
+    page.button_save.click()
+    assert emitted[0].risk_pct == pytest.approx(0.03)
 
 
 def test_every_problem_is_reported_at_once(qapp):
@@ -1049,11 +1129,33 @@ def test_the_status_bar_follows_the_snapshot(qapp, conn):
 
 
 def test_bottom_bar_reflects_the_settings(qapp, conn):
-    window = MainWindow(conn, AppSettings(risk_usdc=12.5, leverage=3, timeframe=Timeframe.H1))
+    window = MainWindow(
+        conn, AppSettings(risk_usdc=12.5, risk_pct=0.0, leverage=3, timeframe=Timeframe.H1)
+    )
     assert window.bottom.timeframe_label.text() == "1 hour"
     assert window.bottom.risk_label.text() == "12.50 USDC"
     assert window.bottom.leverage_label.text() == "3x"
     assert "PAPER" in window.bottom.market_label.text()
+
+
+def test_the_bottom_bar_names_the_running_strategy(qapp, conn):
+    """A live account was once started on the wrong strategy because this bar did
+    not say which one was loaded."""
+    window = MainWindow(conn, AppSettings(strategy="volume_rejection"))
+
+    assert "Volume rejection" in window.bottom.strategy_label.text()
+
+
+def test_the_bottom_bar_shows_a_percentage_risk_as_a_percentage(qapp, conn):
+    """Regression: the bar printed `risk_usdc` regardless, so it read "0.10 USDC"
+    while the engine was staking 0.30% of equity. The number on screen was not the
+    number being risked."""
+    window = MainWindow(conn, AppSettings(risk_pct=0.003, risk_usdc=0.10))
+
+    assert "0.30%" in window.bottom.risk_label.text()
+    # The point of the regression: the stale USDC figure must not be what shows.
+    assert "USDC" not in window.bottom.risk_label.text()
+    assert "0.10" not in window.bottom.risk_label.text()
 
 
 def test_run_controls_follow_the_snapshot(qapp, conn):

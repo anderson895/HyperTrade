@@ -7,6 +7,8 @@ reference material, consulted once, not something to read on every edit.
 
 from __future__ import annotations
 
+import inspect
+
 import qtawesome as qta
 from PySide6.QtCore import Signal
 from PySide6.QtWidgets import (
@@ -29,6 +31,17 @@ from .. import secrets_store
 from ..config import AppSettings
 from ..core.models import MarginMode, Network, Timeframe, TradingMode
 from ..strategy import available
+
+#: One line each, keyed by registry name. Absent is fine — the note just stays
+#: empty rather than the page inventing a description for a strategy it has
+#: never heard of.
+STRATEGY_NOTES = {
+    "volume_rejection": (
+        "Fades failed breakouts: price pushes past the 24-hour range on high "
+        "volume, is rejected, and closes back inside. The stop sits past the "
+        "rejection wick."
+    ),
+}
 from . import theme
 from .chrome import PageHeader
 from .widgets import NOTE_WIDTH, TitledCard, note_label, wrapped_label
@@ -253,7 +266,7 @@ class SettingsPage(QWidget):
         self.stop_buffer.setSuffix(" %")
         self.stop_buffer.setToolTip(
             "How far past the rejection wick the stop sits.\n"
-            "Volume rejection only - the trend follower measures its stop from ATR."
+            "Greyed out for any strategy that does not measure its stop from a wick."
         )
         card.grid_field("Stop Buffer", self.stop_buffer, 1)
 
@@ -275,6 +288,24 @@ class SettingsPage(QWidget):
         self.trail_distance.setSuffix(" %")
         self.trail_distance.setToolTip("How far behind the best price the stop trails.")
         card.grid_field("Trail Distance", self.trail_distance, 1)
+
+        self.post_only = QCheckBox("Rest a maker order at the signal price")
+        self.post_only.setToolTip(
+            "Off: cross the spread and take the trade now, paying the taker fee.\n"
+            "On: rest a post-only order and wait for price to come back. Cheaper,\n"
+            "but the trade only happens if the pullback arrives - which is itself\n"
+            "a filter, and changes which trades you get, not just what they cost."
+        )
+        card.field("Entry", self.post_only)
+
+        self.entry_expiry = QSpinBox()
+        self.entry_expiry.setRange(1, 96)
+        self.entry_expiry.setSuffix(" candles")
+        self.entry_expiry.setToolTip(
+            "How long a resting entry waits before it is cancelled as stale."
+        )
+        card.field("Cancel Unfilled After", self.entry_expiry)
+        self.post_only.toggled.connect(self._refresh_entry_fields)
 
         self.trailing = QCheckBox("Move the stop up behind a winning trade")
         card.field("Trailing Stop", self.trailing)
@@ -442,6 +473,9 @@ class SettingsPage(QWidget):
         self.trail_activation.setValue(settings.trailing_activation_rr)
         self.trail_distance.setValue(settings.trailing_distance_pct * 100)
         self._refresh_trailing_fields()
+        self.post_only.setChecked(settings.post_only_entry)
+        self.entry_expiry.setValue(settings.entry_expiry_candles)
+        self._refresh_entry_fields()
         # Also on load, not only when the dropdown is touched: the page opens on a
         # saved strategy, and the note and the greying describe *that* one.
         self._refresh_strategy_note()
@@ -475,6 +509,8 @@ class SettingsPage(QWidget):
         settings.trailing_enabled = self.trailing.isChecked()
         settings.trailing_activation_rr = self.trail_activation.value()
         settings.trailing_distance_pct = self.trail_distance.value() / 100
+        settings.post_only_entry = self.post_only.isChecked()
+        settings.entry_expiry_candles = self.entry_expiry.value()
         return settings
 
     def set_max_leverage(self, maximum: int) -> None:
@@ -494,6 +530,7 @@ class SettingsPage(QWidget):
             self.strategy, self.take_profit, self.stop_buffer,
             self.trailing, self.trail_activation, self.trail_distance,
             self.risk_unit, self.clamp_size,
+            self.post_only, self.entry_expiry,
         ):
             widget.setEnabled(enabled)
         self.news_block.setEnabled(True)
@@ -522,22 +559,20 @@ class SettingsPage(QWidget):
         self.trail_activation.setEnabled(on)
         self.trail_distance.setEnabled(on)
 
+    def _refresh_entry_fields(self) -> None:
+        """Nothing rests when entries cross the spread, so nothing can expire."""
+        self.entry_expiry.setEnabled(self.post_only.isChecked())
+
     def _refresh_strategy_note(self) -> None:
-        """Say what the chosen strategy does, and which fields it ignores."""
+        """Say what the chosen strategy does, and grey what it does not use."""
         chosen = self.strategy.currentData()
-        if chosen == "volume_rejection":
-            text = (
-                "Fades failed breakouts: price pushes past the 24-hour range on "
-                "high volume, is rejected, and closes back inside. The stop sits "
-                "past the rejection wick."
-            )
-        else:
-            text = (
-                "Follows breakouts: an EMA crossover on candle close, with the stop "
-                "measured from ATR. Stop Buffer does not apply to it."
-            )
-        self.strategy_note.setText(text)
-        self.stop_buffer.setEnabled(chosen == "volume_rejection")
+        strategy = available().get(chosen)
+        self.strategy_note.setText(STRATEGY_NOTES.get(chosen, ""))
+        # Read off the constructor rather than a hardcoded name, so a strategy
+        # added later greys the right fields without anyone remembering to come
+        # back and edit this.
+        accepted = inspect.signature(strategy.__init__).parameters if strategy else {}
+        self.stop_buffer.setEnabled("stop_buffer" in accepted)
 
     def _refresh_notes(self) -> None:
         live = self.mode.currentData() is TradingMode.LIVE

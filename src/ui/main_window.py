@@ -47,6 +47,7 @@ from .chrome import PageHeader, StatusBar, TopBar, divider
 from .controller import BotController, Snapshot
 from .dashboard_page import DashboardPage
 from .logs_page import LogsPage
+from ..strategy import available
 from .settings_page import SettingsPage
 from .stats_page import StatsPage
 from .trades_page import TradesPage
@@ -492,10 +493,28 @@ class MainWindow(QMainWindow):
 
     def _refresh_config_labels(self) -> None:
         settings = self.controller.settings
+        # A percentage has no fixed USDC value, so it is shown as what it is.
+        # Printing `risk_usdc` regardless had the bar reading "0.10 USDC" while the
+        # engine staked 0.30% of equity — the number on screen was not the number
+        # being risked.
+        #
+        # "of equity" is left off: the column header already says "Risk / Trade",
+        # under which a bare percentage has only one reading, and those four
+        # characters are the width the fifth column needed. The unit is still
+        # unmistakable — the alternative reads "12.50 USDC". Settings and the logs
+        # both spell it out in full.
+        risk = (
+            f"{settings.risk_pct:.2%}" if settings.risk_pct
+            else f"{settings.risk_usdc:,.2f} USDC"
+        )
+        strategy = available().get(settings.strategy)
         self.bottom.show_config(
-            market=f"BTC-USD perp [{settings.trading_mode.value.upper()}]",
+            # "perp" dropped: the fifth column needed the width, and the status bar
+            # already carries the mode. This is the only place it is abbreviated.
+            market=f"BTC-USD [{settings.trading_mode.value.upper()}]",
+            strategy=strategy.display_name.split(" (")[0] if strategy else settings.strategy,
             timeframe=settings.timeframe.label,
-            risk=f"{settings.risk_usdc:,.2f} USDC",
+            risk=risk,
             leverage=f"{settings.leverage}x",
         )
 

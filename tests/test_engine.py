@@ -90,9 +90,16 @@ def conn():
 def build(conn, *, signal=None, throttle=False, **overrides):
     settings = AppSettings(
         timeframe=Timeframe.H1,
+        # A fixed stake, because these tests assert exact sizes. `risk_pct`
+        # defaults on to match the spec, and `risk_pct=0` is what switches it off.
         risk_usdc=50.0,
+        risk_pct=0.0,
         leverage=5,
         paper_starting_balance=1_000.0,
+        # These tests are about what the engine does once an entry has *filled*.
+        # Post-only rests instead of filling and has its own tests; left on, every
+        # assertion here would be made against an order still sitting on the book.
+        post_only_entry=False,
     )
     for key, value in overrides.items():
         setattr(settings, key, value)
@@ -303,9 +310,12 @@ async def test_the_news_blackout_blocks_entries(conn):
     assert await broker.managed_position() is None
 
 
-async def test_a_trade_that_does_not_fit_is_rejected_not_resized(conn):
-    """Leverage is a cap. A trade over it is refused, never quietly shrunk."""
-    engine, info, broker = build(conn, signal=LONG_SIGNAL, risk_usdc=50.0, leverage=1)
+async def test_a_trade_that_does_not_fit_is_rejected_when_clamping_is_off(conn):
+    """With the clamp off, leverage is a hard cap: a trade over it is refused,
+    never quietly shrunk into something the user did not ask for."""
+    engine, info, broker = build(
+        conn, signal=LONG_SIGNAL, risk_usdc=50.0, leverage=1, clamp_size_to_leverage=False
+    )
     broker.reset(100.0)  # 0.05 BTC of notional needs far more than 100 USDC at 1x
     await engine.prepare()
     info.candles.extend(make_candles(6)[-1:])
@@ -313,6 +323,31 @@ async def test_a_trade_that_does_not_fit_is_rejected_not_resized(conn):
 
     assert await broker.managed_position() is None
     assert broker.balance == pytest.approx(100.0)  # untouched
+
+
+async def test_the_clamp_shrinks_the_trade_and_says_by_how_much(conn, caplog):
+    """The default, because the specification sizes the same way:
+    `min(risk_amount / sl_dist_pct, equity * MAX_LEVERAGE)`.
+
+    The danger is that it is silent - the user sets 3% and the account risks 0.6%
+    with nothing to say so. The reduction is logged with both numbers, every time."""
+    import logging
+
+    engine, info, broker = build(
+        conn, signal=LONG_SIGNAL, risk_usdc=50.0, leverage=1, clamp_size_to_leverage=True
+    )
+    broker.reset(100.0)
+    await engine.prepare()
+    info.candles.extend(make_candles(6)[-1:])
+
+    with caplog.at_level(logging.WARNING):
+        await engine.tick()
+
+    held = await broker.managed_position()
+    assert held is not None
+    assert held.position.size * held.position.entry_price <= 100.0 * 1  # within 1x
+    assert "capped by the 1x limit" in caplog.text
+    assert "50.00" in caplog.text  # what was asked for is named, not just what was taken
 
 
 # --- exits ----------------------------------------------------------------

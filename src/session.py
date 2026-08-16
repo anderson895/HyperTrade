@@ -14,6 +14,7 @@ real money.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import sqlite3
 
@@ -26,12 +27,12 @@ from .core.models import AssetMeta
 from .data.calendar import EconomicCalendar
 from .data.hl_info import HyperliquidInfo
 from .engine import DEFAULT_POLL_SECONDS, BotEngine
-from .strategy import Strategy, create
+from .strategy import Strategy, available, create
 
 log = logging.getLogger(__name__)
 
 #: Used when the saved strategy cannot be built. Matches `AppSettings.strategy`.
-DEFAULT_STRATEGY = "trend_following"
+DEFAULT_STRATEGY = "volume_rejection"
 
 
 class Session:
@@ -91,17 +92,20 @@ class Session:
     def _build_strategy(self) -> Strategy:
         """The chosen strategy, given the exit settings it understands.
 
-        Only parameters the strategy actually declares are passed. The two differ:
-        the trend follower sizes its stop from ATR and has no wick to buffer, so
-        handing it `stop_buffer` would be a TypeError rather than a setting quietly
-        doing nothing.
+        Only parameters the strategy actually declares are passed. A strategy that
+        does not take one of these would raise TypeError rather than quietly ignore
+        it, which is the point — a setting the user can edit and that reaches
+        nothing is worse than no setting.
         """
         settings = self.settings
-        shared = {"take_profit_rr": settings.take_profit_rr}
-        if settings.strategy == "volume_rejection":
-            shared["stop_buffer"] = settings.stop_buffer_pct
-        elif settings.strategy == "trend_following":
-            shared = {"reward_risk": settings.take_profit_rr}
+        wanted = {
+            "take_profit_rr": settings.take_profit_rr,
+            "stop_buffer": settings.stop_buffer_pct,
+        }
+        accepted = inspect.signature(
+            available()[settings.strategy].__init__
+        ).parameters if settings.strategy in available() else {}
+        shared = {key: value for key, value in wanted.items() if key in accepted}
 
         try:
             return create(settings.strategy, **shared)

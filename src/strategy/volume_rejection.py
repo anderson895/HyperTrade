@@ -5,14 +5,20 @@ the last 24 hours on volume well above normal, then gets pushed straight back in
 and closes there, leaving a long wick where it was rejected. The wick is the
 evidence: buyers or sellers were there in size and lost.
 
-This is a mean-reversion system, and the opposite of the trend follower beside it.
-The two disagree by design — one takes the breakout, the other fades it — so only
-one runs at a time.
+This is a mean-reversion system: it bets against the move that just happened. That
+is the opposite instinct to a breakout system, and it is worth knowing which one you
+are running before the losses start looking like bugs.
 
-Where the numbers came from: this implements a specification the user backtested
-independently, and the periods, multiples and buffers below are theirs. They are
-reproduced exactly rather than tuned, because a strategy that does not match the
-backtest it was chosen from tells you nothing about what to expect.
+Where the numbers came from: this implements the specification in `strategy.txt`,
+and the periods, multiples and buffers below are its author's. They are reproduced
+exactly rather than tuned, because a strategy that does not match the specification
+it was written from tells you nothing about what that specification does.
+
+What it does on BTC, measured rather than assumed: as specified, it loses on every
+timeframe with a sample big enough to read — including 15m, the one it is named
+after, at −0.448R per trade. Set fees to zero and 15m still loses (−0.182R), so the
+signal is the problem there, not the cost. The only positive rows are Daily, on 12
+trades, which is noise. Read the evidence table in README.md before running it.
 """
 
 from __future__ import annotations

@@ -14,10 +14,12 @@ class BottomBar(QFrame):
         super().__init__()
         self.setProperty("card", True)
 
-        # Four columns, not five: the strategy is already named under the chart and
-        # on the About page, and a fifth column pushed the buttons into clipping.
-        # Market text is short for the same reason.
-        market_col, self.market_label = labelled_column("Market", "BTC-USD perp [PAPER]")
+        # The strategy is named here because a live account was once started on the
+        # wrong one and this bar did not say which was loaded. One strategy ships
+        # today, but the registry behind the Settings dropdown takes more, and the
+        # cost of naming it is one column.
+        market_col, self.market_label = labelled_column("Market", "BTC-USD [PAPER]")
+        strategy_col, self.strategy_label = labelled_column("Strategy", "-")
         timeframe_col, self.timeframe_label = labelled_column("Timeframe", "-")
         risk_col, self.risk_label = labelled_column("Risk / Trade", "-")
         leverage_col, self.leverage_label = labelled_column("Leverage", "-")
@@ -49,9 +51,17 @@ class BottomBar(QFrame):
 
         row = QHBoxLayout(self)
         row.setContentsMargins(16, 10, 16, 10)
-        for column in (market_col, timeframe_col, risk_col, leverage_col):
+        # Tighter than the original four columns, so the fifth fits without
+        # squeezing the buttons into "START B(". There is a test that measures this
+        # at the smallest allowed window; it caught the first attempt.
+        #
+        # Spacing goes *between* columns, not after the last one — a stretch follows
+        # it, so that trailing gap was width spent on nothing.
+        columns = (market_col, strategy_col, timeframe_col, risk_col, leverage_col)
+        for index, column in enumerate(columns):
+            if index:
+                row.addSpacing(8)
             row.addLayout(column)
-            row.addSpacing(20)
         row.addStretch()
         row.addWidget(self.start_btn)
         row.addSpacing(8)
@@ -62,8 +72,11 @@ class BottomBar(QFrame):
         row.addSpacing(12)
         row.addLayout(uptime_col)
 
-    def show_config(self, market: str, timeframe: str, risk: str, leverage: str) -> None:
+    def show_config(
+        self, market: str, timeframe: str, risk: str, leverage: str, strategy: str = "-"
+    ) -> None:
         self.market_label.setText(market)
+        self.strategy_label.setText(strategy)
         self.timeframe_label.setText(timeframe)
         self.risk_label.setText(risk)
         self.leverage_label.setText(leverage)

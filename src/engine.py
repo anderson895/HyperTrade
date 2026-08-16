@@ -191,8 +191,10 @@ class BotEngine:
         await self.broker.set_leverage(self.settings.leverage, self.settings.margin_mode)
         await self.load_history()
         log.info(
-            "risk %g USDC | %dx %s | strategy %s %s",
-            self.settings.risk_usdc, self.settings.leverage,
+            "risk %s | %dx %s | strategy %s %s",
+            f"{self.settings.risk_pct:.2%} of equity" if self.settings.risk_pct
+            else f"{self.settings.risk_usdc:g} USDC",
+            self.settings.leverage,
             self.settings.margin_mode.value, self.strategy.name,
             self.strategy.parameters(),
         )

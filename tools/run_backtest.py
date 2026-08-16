@@ -1,12 +1,20 @@
-"""Backtest the trend-following strategy on real Hyperliquid candles.
+"""Backtest the shipped strategy on real Hyperliquid candles.
 
 Dev tool, not shipped in the app. Run from the project root:
 
     .\\venv\\Scripts\\python.exe tools\\run_backtest.py
     .\\venv\\Scripts\\python.exe tools\\run_backtest.py --timeframes 1h 4h 1d
 
-It exists to answer one question with evidence instead of opinion: do the optional
-chop filters actually improve expectancy? Read the numbers before enabling one.
+It exists to answer one question with evidence instead of opinion: does a change to
+the settings actually improve expectancy? Read the numbers before making one.
+
+Two things to read carefully, because both have already misled someone:
+
+**Trade counts, not just expectancy.** A row of 2 trades and a row of 55 look alike
+in this table and are not alike at all. Rows below `MEANINGFUL_TRADES` are marked.
+
+**Every variant is measured on the same history.** Compare six and the best one is
+partly luck; it is a starting point for a test, not a result.
 
 Caveat carried from src/backtest.py: stops are assumed to fill exactly at the stop
 price, so every expectancy printed here is optimistic.
@@ -26,6 +34,11 @@ from src.core.models import Timeframe  # noqa: E402
 from src.data.hl_info import HyperliquidInfo  # noqa: E402
 from src.strategy import create  # noqa: E402
 
+#: Below this, a row is noise dressed as evidence. Twenty trades of a 40% winner
+#: swings between 4 and 12 wins on chance alone, which is the whole range between
+#: "promising" and "hopeless".
+MEANINGFUL_TRADES = 25
+
 #: How much history to pull per timeframe. Short timeframes need paging past the
 #: 5000-candle cap; long ones are limited by how long BTC has traded on Hyperliquid.
 CANDLE_COUNTS = {
@@ -41,12 +54,6 @@ CANDLE_COUNTS = {
 #: Variants to compare, per strategy. Each entry is a set of constructor overrides;
 #: the point is to read the columns against each other, not to admire one number.
 CONFIGS: dict[str, dict[str, dict]] = {
-    "trend_following": {
-        "no filter": {},
-        "slope lb=20": {"slope_lookback": 20},
-        "EMA200 trend": {"trend_filter_period": 200},
-        "EMA200 + lb20": {"trend_filter_period": 200, "slope_lookback": 20},
-    },
     # The knobs the user actually has in Settings, so the table answers "what should
     # I set these to" rather than some question nobody asked.
     "volume_rejection": {
@@ -85,7 +92,7 @@ def main() -> int:
     parser.add_argument("--fee-bps", type=float, default=4.5)
     parser.add_argument(
         "--strategy",
-        default="trend_following",
+        default="volume_rejection",
         choices=sorted(CONFIGS),
         help="which strategy's variants to compare",
     )
@@ -100,7 +107,11 @@ def main() -> int:
     print(f"\n{args.strategy}, {args.fee_bps}bps round-trip fees")
     print("Expectancy is R per trade, net of fees. Positive is profitable.\n")
 
-    totals: dict[str, list[float]] = {label: [] for label in variants}
+    #: label -> (total R across every trade, total trades). Summed, not averaged
+    #: per timeframe: a weekly run of 2 trades once counted as much as a 30-minute
+    #: run of 55, which turned a strategy that lost on every liquid timeframe into
+    #: a positive-looking average.
+    totals: dict[str, tuple[float, int]] = {label: (0.0, 0) for label in variants}
 
     for timeframe in timeframes:
         candles = history[timeframe]
@@ -111,16 +122,22 @@ def main() -> int:
                 print(f"  {label:15s} not enough history (needs {strategy.warmup_candles})")
                 continue
             result = run_backtest(strategy, candles, fee_bps=args.fee_bps)
-            print(f"  {label:15s} {result.summary()}")
+            marker = "" if result.count >= MEANINGFUL_TRADES else "   <- too few to read"
+            print(f"  {label:15s} {result.summary()}{marker}")
             if result.count:
-                totals[label].append(result.expectancy_r)
+                carried_r, carried_n = totals[label]
+                totals[label] = (
+                    carried_r + result.expectancy_r * result.count,
+                    carried_n + result.count,
+                )
         print()
 
-    print("--- average expectancy across timeframes ---")
-    for label, values in totals.items():
-        if values:
-            average = sum(values) / len(values)
-            print(f"  {label:15s} {average:+.3f}R over {len(values)} timeframes")
+    print(f"--- expectancy per trade, pooled across timeframes ---")
+    print(f"    Every trade counts once. A timeframe with {MEANINGFUL_TRADES} trades or")
+    print(f"    fewer is marked above and carries correspondingly little weight here.\n")
+    for label, (total_r, count) in totals.items():
+        if count:
+            print(f"  {label:15s} {total_r / count:+.3f}R over {count:,} trades")
     return 0
 
 

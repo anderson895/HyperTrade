@@ -75,7 +75,8 @@ def test_default_paper_settings_are_startable():
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"risk_usdc": 0},
+        {"risk_usdc": 0, "risk_pct": 0},  # both off: nothing left to stake
+        {"risk_pct": 0.90},  # 90% of equity on one trade
         {"leverage": 0},
         {"slippage": 0.5},
         {"slippage": 0},
@@ -120,14 +121,26 @@ def test_live_mode_is_startable_once_configured():
 # --- advisories -----------------------------------------------------------
 
 
-@pytest.mark.parametrize("timeframe", [Timeframe.M5, Timeframe.M15])
+@pytest.mark.parametrize(
+    "timeframe", [Timeframe.M5, Timeframe.M15, Timeframe.M30, Timeframe.H4]
+)
 def test_loss_making_timeframes_are_flagged(timeframe):
-    """5m and 15m backtested at -0.9R and -0.4R; the user gets told, not blocked."""
+    """Measured 2026-08-16: -0.316R, -0.448R, -0.293R and -0.399R per trade. The
+    user gets told, not blocked - it is their money and their call."""
     settings = AppSettings(timeframe=timeframe)
     assert settings.advisories()
     assert settings.validate() == []  # a warning, not a blocker
 
 
-def test_the_default_timeframe_is_not_flagged():
-    assert AppSettings().timeframe is Timeframe.H4
-    assert AppSettings().advisories() == []
+def test_the_default_timeframe_is_the_one_the_specification_names():
+    """strategy.txt is called "The 15-Minute Volume Rejection Strategy" and sizes
+    its range as "96 candles (the past 24 hours of 15-minute price action)"."""
+    assert AppSettings().timeframe is Timeframe.M15
+
+
+def test_the_default_timeframe_warns_about_itself():
+    """Deliberate, and the one place the two rules collide: the spec asks for 15m
+    and 15m is the worst timeframe measured. Following the spec wins, and the
+    warning carries the evidence - so a fresh install says so on the first start
+    rather than defaulting to something the client never asked for."""
+    assert AppSettings().advisories()

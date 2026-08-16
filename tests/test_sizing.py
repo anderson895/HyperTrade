@@ -95,7 +95,7 @@ def test_percent_risk_scales_with_the_account():
 def test_a_fixed_risk_ignores_the_account_size():
     from src.config import AppSettings
 
-    settings = AppSettings(risk_usdc=2.5)
+    settings = AppSettings(risk_usdc=2.5, risk_pct=0.0)  # 0 is what turns the % off
 
     assert settings.risk_for(100.0) == 2.5
     assert settings.risk_for(10_000.0) == 2.5
