@@ -1488,6 +1488,60 @@ def test_errors_raise_the_alert_banner(qapp, conn):
     assert not window.alert.isVisibleTo(window)
 
 
+def test_a_save_that_worked_says_so(qapp, conn):
+    """It used to look identical to a save that never registered - the scrim came,
+    went, and nothing else changed."""
+    window = MainWindow(conn, AppSettings())
+
+    window._on_settings_applied(
+        AppSettings(timeframe=Timeframe.M15, risk_pct=0.03, leverage=5)
+    )
+
+    assert window.alert.isVisibleTo(window)
+    text = window.alert._label.text()
+    # It names what is in force, so the confirmation doubles as a check.
+    assert "PAPER" in text and "15 mins" in text and "3.00% of equity" in text
+    assert "5x" in text
+
+
+def test_a_confirmation_never_paints_over_an_error(qapp, conn):
+    """Applying Live settings can fall back to Paper, and that failure is raised
+    before the applied signal. A green "Saved" on top of it would bury the one
+    thing the user has to see."""
+    window = MainWindow(conn, AppSettings())
+
+    window._on_failed("Live mode refused - running in PAPER instead: no API key")
+    window._on_settings_applied(AppSettings())
+
+    assert window.alert.isVisibleTo(window)
+    assert "Live mode refused" in window.alert._label.text()
+    assert "Settings saved" not in window.alert._label.text()
+
+
+def test_a_confirmation_clears_itself(qapp, conn):
+    """Errors are dismissed by hand; a confirmation that stayed would become
+    furniture, and the next one would be indistinguishable from the last."""
+    from src.ui.alert_banner import AlertBanner
+
+    banner = AlertBanner()
+    banner.show_success("Settings saved")
+    assert banner.isVisibleTo(banner) or not banner.isHidden()
+
+    banner._timer.timeout.emit()  # fire the auto-dismiss without waiting for it
+    assert banner.isHidden()
+
+
+def test_an_error_outranks_a_confirmation_already_showing(qapp, conn):
+    from src.ui.alert_banner import AlertBanner
+
+    banner = AlertBanner()
+    banner.show_success("Settings saved")
+    banner.show_error("Could not reach Hyperliquid")
+
+    assert "Could not reach Hyperliquid" in banner._label.text()
+    assert not banner._timer.isActive()  # it must not time itself out
+
+
 def test_sidebar_collapse_is_remembered(qapp, conn):
     window = MainWindow(conn, AppSettings())
     assert window._sidebar.width() == main_window.SIDEBAR_WIDE

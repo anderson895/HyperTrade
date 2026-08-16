@@ -485,6 +485,20 @@ class MainWindow(QMainWindow):
         self.busy.stop()
         self.settings_page.load(settings)
         self._refresh_config_labels()
+        # A save that worked looked exactly like one that never registered: the
+        # scrim appeared, went, and nothing else changed. It names what is now in
+        # force rather than saying "Saved", so the confirmation is also a check.
+        # `show_success` refuses to paint over an error, and a Live session that
+        # fell back to Paper raises one before this runs.
+        risk = (
+            f"{settings.risk_pct:.2%} of equity" if settings.risk_pct
+            else f"{settings.risk_usdc:,.2f} USDC"
+        )
+        self.alert.show_success(
+            f"Settings saved - {settings.trading_mode.value.upper()} on "
+            f"{settings.network.value}, {settings.timeframe.label}, risk {risk}, "
+            f"{settings.leverage}x {settings.margin_mode.value}"
+        )
 
     def _on_failed(self, message: str) -> None:
         """A failure ends whatever was being waited on, so the scrim goes too."""
