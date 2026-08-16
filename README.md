@@ -77,22 +77,35 @@ aside. See [The news blackout](#the-news-blackout).
 ## Does it work?
 
 Not on the evidence available. Measured **2026-08-16** on real Hyperliquid candles, spec settings
-(0.1% stop buffer, 2R target), 4.5bps round-trip fees:
+(0.1% stop buffer, 2R target).
 
-| Timeframe | Trades | Win rate | Expectancy | Same, with fees at zero | History tested |
-|---|---:|---:|---:|---:|---|
-| 5 mins | 40 | 37.5% | **−0.316R** | +0.125R | 2026-07-29 → 08-16 |
-| **15 mins** (spec) | 44 | 27.3% | **−0.448R** | −0.182R | 2026-06-24 → 08-16 |
-| 30 mins | 53 | 30.2% | **−0.293R** | −0.111R | 2026-05-03 → 08-16 |
-| 1 hour | 52 | 34.6% | −0.066R | +0.038R | 2026-01-19 → 08-16 |
-| 4 hours | 46 | 21.7% | **−0.399R** | −0.348R | 2024-05-04 → 08-16 |
-| Daily | 12 | 50.0% | +0.484R | +0.500R | 2020-08-19 → 08-16 |
-| **Pooled** | **247** | | **−0.258R** | −0.068R | |
+Fees are quoted **per side**. The backtester charges them on the entry and again on the exit, so
+`4.5` is a 9bps round trip. That rate is not an assumption: real fills on the live account came
+back at exactly **4.50 bps** a side with `crossed: true`. The middle column models the shipped
+configuration, where `post_only_entry` rests the entry and pays the maker rate instead of crossing;
+the stop always crosses, because a stop that does not cross does not get you out.
+
+| Timeframe | Trades | Win rate | Taker both legs | Maker entry (shipped) | Fees at zero |
+|---|---:|---:|---:|---:|---:|
+| 5 mins | 40 | 37.5% | **−0.316R** | −0.169R | +0.125R |
+| **15 mins** (spec) | 44 | 27.3% | **−0.448R** | −0.359R | −0.182R |
+| 30 mins | 53 | 30.2% | **−0.287R** | −0.227R | −0.105R |
+| 1 hour | 52 | 34.6% | −0.066R | **−0.031R** | +0.038R |
+| 4 hours | 46 | 21.7% | **−0.399R** | — | −0.348R |
+| Daily | 12 | 50.0% | +0.484R | — | +0.500R |
 
 Read carefully:
 
+- **Every timeframe with a readable sample loses, in every fee column.** Paying maker on the entry
+  narrows the gap — 1h comes within a third of a tenth of an R of flat — but does not cross it.
 - **15m loses even with fees set to zero.** That separates signal from cost, and it says the signal
   is the problem at that speed. No fee tier, rebate or maker-only fill rescues it.
+- **The maker column is modelled, not observed.** It splits 6bps evenly across the two legs, and no
+  maker fill has been measured on the live account yet. Treat it as the optimistic bound it is.
+- **Where the edge actually goes.** At 5 mins the signal is worth +0.125R before costs, which is
+  what a 37.5% win rate at 1:2 should pay. The stop sits 0.12–0.30% from entry, so a 9bps round
+  trip is 15–37% of R — wins land near +1.5R instead of +2R, losses near −1.45R instead of −1R,
+  and a 1:2 system behaves like a 1:1 one. The signal has an edge; the cost of taking it is larger.
 - **Daily is the one positive row, on 12 trades.** Twelve trades of a 50% winner swings between 3
   and 9 wins on chance alone. It is not evidence, and the backtester marks it as such.
 - **4h is worse than 5m.** A slower timeframe is not a safer one, which is why the app's advisory

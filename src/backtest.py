@@ -30,7 +30,16 @@ from .strategy.base import Strategy
 
 log = logging.getLogger(__name__)
 
-#: Hyperliquid base-tier taker fee, applied on entry and on exit.
+#: Hyperliquid base-tier taker fee, **per side** — charged on the entry and again on
+#: the exit, so this default is a 9bps round trip. Verified against real fills on a
+#: live account: both legs came back at exactly 4.50 bps with `crossed: true`.
+#:
+#: It assumes taker on both legs, which is right for an IOC entry and always right
+#: for the stop, since a stop must cross to get out. With `post_only_entry` on the
+#: entry rests and pays the maker rate instead, so the true cost is lower than this
+#: models — pass `fee_bps=3.0` for roughly that (6bps round trip). No maker fill has
+#: been measured on the live account yet, so that figure is the published rate, not
+#: an observed one.
 DEFAULT_FEE_BPS = 4.5
 
 

@@ -104,7 +104,11 @@ def main() -> int:
     print(f"Fetching {args.coin} candles from Hyperliquid...")
     history = asyncio.run(fetch(args.coin, timeframes))
 
-    print(f"\n{args.strategy}, {args.fee_bps}bps round-trip fees")
+    # Per side, not round trip. `run_backtest` charges `fee_bps` on the entry and
+    # again on the exit, so the default 4.5 is a 9bps round trip. It was printed as
+    # "round-trip" here and copied into the README that way, which halved every fee
+    # figure a reader thought they were looking at.
+    print(f"\n{args.strategy}, {args.fee_bps}bps per side ({args.fee_bps * 2:g}bps round trip)")
     print("Expectancy is R per trade, net of fees. Positive is profitable.\n")
 
     #: label -> (total R across every trade, total trades). Summed, not averaged
