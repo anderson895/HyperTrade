@@ -17,11 +17,23 @@ ADDRESS = "0x5eA3e82B3605201d09b349789feD24E30D76c41b"
 
 
 class FakeInfo:
-    """Stands in for the read client. `perps`/`spot` set what the account holds."""
+    """Stands in for the read client.
 
-    def __init__(self, perps: float | None = None, spot: float = 0.0):
+    `perps`/`spot` set what the account holds; `agent_of` is the wallet Hyperliquid
+    says the agent key may trade for, and None means it is not an agent at all.
+    """
+
+    def __init__(
+        self,
+        perps: float | None = None,
+        spot: float = 0.0,
+        agent_of: str | None = ADDRESS,
+        expiries: dict[str, int] | None = None,
+    ):
         self.perps = perps
         self.spot = spot
+        self.agent_of = agent_of
+        self.expiries = expiries or {}
 
     async def clearinghouse_state(self, address):
         if self.perps is None:
@@ -32,6 +44,12 @@ class FakeInfo:
 
     async def spot_usdc(self, address):
         return self.spot
+
+    async def agent_owner(self, agent_address):
+        return self.agent_of
+
+    async def agent_expiries(self, address):
+        return self.expiries
 
     async def aclose(self):
         pass
@@ -167,6 +185,50 @@ async def test_money_in_the_spot_wallet_is_named_as_the_reason(conn, monkeypatch
     assert isinstance(session.broker, PaperBroker)
     assert "99.72 USDC is sitting in spot" in session.fell_back_to_paper
     assert "transfer it to Perps" in session.fell_back_to_paper
+
+
+async def test_a_key_that_is_not_an_approved_agent_is_refused(conn, monkeypatch):
+    """Reading a balance needs only an address, so up to this check a wrong key
+    looked identical to a right one - the account value came back, the connection
+    read as healthy, and nothing touched the key until the first real order."""
+    monkeypatch.setattr("src.secrets_store.load_agent_key", lambda: "0x" + "ab" * 32)
+
+    session = await build(conn, live_settings(), FakeInfo(perps=500.0, agent_of=None))
+
+    assert isinstance(session.broker, PaperBroker)
+    assert "not an approved agent" in session.fell_back_to_paper
+
+
+async def test_an_agent_for_a_different_account_is_refused(conn, monkeypatch):
+    """A key that works, for someone else's wallet. Every order it signed would be
+    rejected, and nothing before this said so."""
+    monkeypatch.setattr("src.secrets_store.load_agent_key", lambda: "0x" + "ab" * 32)
+    someone_else = "0x1111111111111111111111111111111111111111"
+
+    session = await build(
+        conn, live_settings(), FakeInfo(perps=500.0, agent_of=someone_else)
+    )
+
+    assert isinstance(session.broker, PaperBroker)
+    assert "belongs to a different account" in session.fell_back_to_paper
+    assert someone_else in session.fell_back_to_paper
+
+
+async def test_a_lapsed_approval_is_refused(conn, monkeypatch):
+    """An approval that has run out is a wrong key arriving on a schedule: the key
+    is right, and it stops being able to order while everything else looks fine."""
+    from eth_account import Account
+
+    key = "0x" + "ab" * 32
+    monkeypatch.setattr("src.secrets_store.load_agent_key", lambda: key)
+    agent = Account.from_key(key).address.lower()
+
+    session = await build(
+        conn, live_settings(), FakeInfo(perps=500.0, expiries={agent: 1})
+    )
+
+    assert isinstance(session.broker, PaperBroker)
+    assert "expired" in session.fell_back_to_paper
 
 
 async def test_an_empty_account_is_refused_rather_than_left_to_fail_per_trade(conn, monkeypatch):

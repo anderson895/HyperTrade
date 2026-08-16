@@ -227,7 +227,7 @@ class MainWindow(QMainWindow):
         self.dash = DashboardPage(conn)
         self.settings_page = SettingsPage(settings)
         self.logs = LogsPage()
-        self.trades = TradesPage(conn)
+        self.trades = TradesPage(conn, on_sync=self._on_sync_history)
         self.stats = StatsPage(conn)
 
         self.about = AboutPage()
@@ -315,6 +315,7 @@ class MainWindow(QMainWindow):
         self.settings_page.resetPaper.connect(
             lambda: asyncio.ensure_future(self.controller.reset_paper())
         )
+        self.settings_page.keyForgotten.connect(self._on_key_forgotten)
         self.settings_page.previewRequested.connect(
             lambda: self._schedule(self._refresh_preview)
         )
@@ -499,6 +500,46 @@ class MainWindow(QMainWindow):
             f"{settings.network.value}, {settings.timeframe.label}, risk {risk}, "
             f"{settings.leverage}x {settings.margin_mode.value}"
         )
+
+    def _on_key_forgotten(self) -> None:
+        """Said plainly, because the mode changes underneath it.
+
+        Emitted before `saved`, so this banner lands first and the "Settings saved -
+        PAPER" confirmation that follows reads as the consequence rather than as a
+        change nobody asked for.
+        """
+        self.alert.show_error(
+            "API wallet key removed from Windows Credential Manager. Switched to "
+            "Paper - without a key this app cannot act on a live account, and it "
+            "will not go on showing you one. Nothing on Hyperliquid changed: revoke "
+            "the agent there as well if that is what you meant."
+        )
+
+    def _on_sync_history(self) -> None:
+        """Pull the wallet's own fill history and fold in whatever is missing.
+
+        Reported on the Trades page rather than the alert banner: it is the answer
+        to a button pressed on that page, and a red strip at the top of the window
+        is for things that happened *to* you, not for things you asked for.
+        """
+        async def run() -> None:
+            try:
+                imported, seen = await self.controller.sync_trade_history()
+            except Exception as exc:  # noqa: BLE001 — shown, not swallowed
+                log.warning("could not sync trade history: %s", exc)
+                self.trades.set_status(f"Sync failed: {exc}", theme.RED)
+                return
+            self.trades.reload(self._snapshot.mode)
+            self.stats.refresh(self._snapshot.mode)
+            self.trades.set_status(
+                f"Synced - {imported} new fill(s) imported, {seen} in the exchange "
+                f"history" if imported else
+                f"Already up to date - {seen} fill(s) in the exchange history",
+                theme.GREEN if imported else theme.MUTED,
+            )
+
+        self.trades.set_status("Fetching fill history from Hyperliquid...", theme.AMBER)
+        self._schedule(run)
 
     def _on_failed(self, message: str) -> None:
         """A failure ends whatever was being waited on, so the scrim goes too."""

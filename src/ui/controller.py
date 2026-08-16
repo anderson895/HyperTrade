@@ -22,6 +22,7 @@ from ..core.sizing import RejectReason, Rejection, minimum_leverage_for, plan_po
 from ..engine import BotEngine
 from ..errors import FEED_ERRORS, TRADING_ERRORS
 from ..session import Session, open_session
+from ..store import import_exchange_fills
 
 log = logging.getLogger(__name__)
 
@@ -166,9 +167,49 @@ class BotController(QObject):
         await self.refresh()
 
     async def reset_paper(self) -> None:
-        if self.session is not None:
-            self.session.broker.reset(self.settings.paper_starting_balance)
+        """Wipe the simulated account back to its starting balance.
+
+        Guarded rather than trusted. `reset` exists only on the paper broker — a
+        live account cannot be reset, and should not pretend to be — so in Live this
+        raised `AttributeError: 'LiveBroker' object has no attribute 'reset'` from
+        inside a fire-and-forget task, where the traceback goes to the log and the
+        user sees nothing at all. Same shape as the missing `balance` that took the
+        dashboard down: paper-only behaviour reached through the shared interface.
+        """
+        if self.session is None:
+            return
+        if not isinstance(self.session.broker, PaperBroker):
+            self._fail(
+                "Reset is for the simulated account only - a live balance is real "
+                "money and is not resettable."
+            )
+            return
+        self.session.broker.reset(self.settings.paper_starting_balance)
         await self.refresh()
+
+    async def sync_trade_history(self) -> tuple[int, int]:
+        """Pull the wallet's own fill history from Hyperliquid. Returns (new, seen).
+
+        Live only, and not because of a rule — a paper account has no wallet to read.
+
+        Two calls, not one: a fill says what happened, and the order behind it says
+        why. Without the second, every imported exit would be labelled a guess.
+        """
+        if self.session is None:
+            raise RuntimeError("not connected")
+        if not self.settings.is_live:
+            raise RuntimeError("Paper mode has no wallet to sync from")
+        address = self.settings.account_address
+        if not address:
+            raise RuntimeError("no wallet address is configured")
+
+        raw = await self.session.info.user_fills(address)
+        order_types = await self.session.info.order_types(address)
+        imported, seen = import_exchange_fills(
+            self.conn, TradingMode.LIVE, raw, order_types
+        )
+        log.info("synced %d new fill(s) from %d in the exchange history", imported, seen)
+        return imported, seen
 
     async def fetch_chart_candles(self, timeframe: Timeframe, count: int) -> list[Candle]:
         """History for a chart view other than the bot's own timeframe.

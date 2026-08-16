@@ -19,7 +19,7 @@ import logging
 import sqlite3
 
 from . import secrets_store
-from .broker.base import Broker
+from .broker.base import Broker, now_ms
 from .broker.live import LiveBroker
 from .broker.paper import PaperBroker
 from .config import AppSettings
@@ -163,6 +163,46 @@ class Session:
             )
 
         wallet = Account.from_key(key)
+
+        # Prove the key can actually act for this account, before anything can be
+        # ordered with it. Reading a balance needs only an address, so up to here a
+        # wrong key looks identical to a right one: the account value comes back,
+        # the connection reads as healthy, and nothing exercises the key until the
+        # first real order — which is the worst possible moment to find out.
+        owner = await self.info.agent_owner(wallet.address)
+        if owner is None:
+            raise RuntimeError(
+                f"the API wallet key is not an approved agent on "
+                f"{self.settings.network.value}. It derives to {wallet.address}, "
+                f"which Hyperliquid does not recognise as an agent for any account. "
+                f"Approve it in the Hyperliquid app, or paste the right key."
+            )
+        if owner.lower() != self.settings.account_address.lower():
+            raise RuntimeError(
+                f"the API wallet key belongs to a different account. It derives to "
+                f"{wallet.address}, which is an approved agent for {owner} — not for "
+                f"{self.settings.account_address}. Orders signed with it would be "
+                f"rejected."
+            )
+
+        # Approvals lapse. When one does the key stops being able to order while
+        # everything else still looks fine, which is a wrong key arriving on a
+        # schedule — so it is worth saying before it happens, not after.
+        expiries = await self.info.agent_expiries(self.settings.account_address)
+        expires_ms = expiries.get(wallet.address.lower())
+        if expires_ms:
+            days = (expires_ms - now_ms()) / 86_400_000
+            if days <= 0:
+                raise RuntimeError(
+                    f"the API wallet approval expired. Re-approve {wallet.address} "
+                    f"in the Hyperliquid app."
+                )
+            if days <= 14:
+                log.warning(
+                    "the API wallet approval expires in %.0f day(s) - re-approve "
+                    "%s before it lapses", days, wallet.address,
+                )
+
         # Constructing an Exchange fetches the asset universe over the network, so it
         # is done off the event loop like every other SDK call.
         exchange = await asyncio.to_thread(

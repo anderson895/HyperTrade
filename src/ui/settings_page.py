@@ -48,8 +48,14 @@ from .chrome import PageHeader
 from .widgets import NOTE_WIDTH, TitledCard, note_label, wrapped_label
 
 
-def _secret_field() -> tuple[QWidget, QLineEdit]:
-    """A masked input with an eye toggle. Blank means "keep whatever is stored"."""
+def _secret_field() -> tuple[QWidget, QLineEdit, QToolButton]:
+    """A masked input with an eye toggle and a way to forget the stored key.
+
+    Blank means "keep whatever is stored", which is the right default and also made
+    the key unremovable: the only way to change it was to paste another over it, and
+    there was no way at all to take it back out. Handing the app on, or revoking an
+    agent, both need that.
+    """
     edit = QLineEdit()
     edit.setEchoMode(QLineEdit.EchoMode.Password)
     edit.setPlaceholderText(
@@ -67,13 +73,22 @@ def _secret_field() -> tuple[QWidget, QLineEdit]:
 
     eye.toggled.connect(toggle)
 
+    forget = QToolButton()
+    forget.setIcon(qta.icon("fa6s.trash-can", color=theme.RED))
+    forget.setToolTip(
+        "Remove the stored key from Windows Credential Manager.\n"
+        "The bot cannot trade live without one. Nothing on Hyperliquid changes -\n"
+        "revoke the agent there too if that is what you mean to do."
+    )
+
     container = QWidget()
     row = QHBoxLayout(container)
     row.setContentsMargins(0, 0, 0, 0)
     row.setSpacing(6)
     row.addWidget(edit)
     row.addWidget(eye)
-    return container, edit
+    row.addWidget(forget)
+    return container, edit, forget
 
 
 class _ProblemBox(QFrame):
@@ -130,6 +145,9 @@ class _ProblemBox(QFrame):
 class SettingsPage(QWidget):
     saved = Signal(object)  # AppSettings
     resetPaper = Signal()  # noqa: N815 — Qt signal naming
+    #: The stored agent key was deleted. Emitted before `saved`, so the window can
+    #: say why the mode just changed rather than leaving it to be inferred.
+    keyForgotten = Signal()  # noqa: N815 — Qt signal naming
     #: Something that changes what a trade would look like was just edited.
     previewRequested = Signal()  # noqa: N815 — Qt signal naming
 
@@ -193,8 +211,15 @@ class SettingsPage(QWidget):
         header = PageHeader(
             "fa6s.gear", "Bot Settings", "Configure your trading bot preferences"
         )
+        # Hidden in Live, where there is nothing it can do: `reset` exists only on
+        # the paper broker, because a live balance is real money. Offered there it
+        # crashed the task it ran in and showed the user nothing.
         self.button_reset = QPushButton("  Reset Paper Account")
         self.button_reset.setIcon(qta.icon("fa6s.rotate-left", color=theme.MUTED))
+        self.button_reset.setToolTip(
+            "Set the simulated balance back to the paper starting balance and "
+            "clear its trade history. Paper mode only."
+        )
         self.button_save = QPushButton("  Save Settings")
         self.button_save.setObjectName("accentBtn")
         self.button_save.setIcon(qta.icon("fa6s.floppy-disk", color="#04140c"))
@@ -231,7 +256,8 @@ class SettingsPage(QWidget):
             "never signs with this wallet's key."
         )
 
-        self._key_row, self.agent_key = _secret_field()
+        self._key_row, self.agent_key, self.button_forget_key = _secret_field()
+        self.button_forget_key.clicked.connect(self._forget_agent_key)
         self._key_label = card.field("API Wallet (Agent) Key", self._key_row)
         self._key_note = card.note(
             "Paste the key an approved API wallet gives you - the long one, 64 "
@@ -570,6 +596,7 @@ class SettingsPage(QWidget):
             self.mode, self.network, self.timeframe, self.margin, self.risk,
             self.leverage, self.balance, self.slippage, self.daily_loss,
             self.address, self.agent_key, self.button_save, self.button_reset,
+            self.button_forget_key,
             self.take_profit, self.stop_buffer,
             self.trailing, self.trail_activation, self.trail_distance,
             self.risk_unit, self.clamp_size,
@@ -642,6 +669,13 @@ class SettingsPage(QWidget):
         ):
             widget.setVisible(live)
 
+        # And emptied on the way out, so nothing is left sitting in a box nobody can
+        # see. Switching to Paper is abandoning the live setup anyway; the stored key
+        # is untouched in Credential Manager either way, since only Save writes it.
+        if not live:
+            self.agent_key.clear()
+        self._refresh_key_controls()
+
         # And the mirror image: the paper balance does nothing in Live, where the
         # balance is whatever the exchange says. Shown there it reads as a starting
         # stake for real money.
@@ -654,15 +688,58 @@ class SettingsPage(QWidget):
         for widget in (self._margin_label, self.margin):
             widget.setVisible(live)
 
+        # Reset belongs to the paper broker alone. This one was missed when the
+        # fields were audited — the audit walked the form and never looked at the
+        # buttons in the header, and it took an AttributeError on a live account to
+        # find it.
+        self.button_reset.setVisible(not live)
+
         advisories = self.current().advisories()
         self.timeframe_note.setText(" ".join(advisories))
         self.timeframe_note.setVisible(bool(advisories))
         self.timeframe_note.setStyleSheet(f"color: {theme.AMBER}; background: transparent")
 
+    def _forget_agent_key(self) -> None:
+        """Take the stored key back out of Credential Manager, and stop being live.
+
+        Immediate, and not behind a confirmation dialog — a modal would block the
+        event loop the bot runs on, which this app avoids everywhere. It is cheaply
+        undone by pasting the key again, and Settings are locked while the bot runs,
+        so it cannot happen underneath an open position.
+
+        The mode drops to Paper as part of the same action, deliberately. A balance
+        is read from the *address*, which needs no key at all, so deleting the key
+        alone would leave the dashboard showing a real account this app can no
+        longer act on — credentials removed, and everything still reading as live.
+        Rewiring to Paper makes the screen true again.
+        """
+        secrets_store.delete_agent_key()
+        self.agent_key.clear()
+        self.agent_key.setPlaceholderText("0x...")
+        self.mode.setCurrentIndex(self.mode.findData(TradingMode.PAPER))
+        self._refresh_notes()  # hides the credential fields, refreshes the buttons
+
+        self.problem.setVisible(False)
+        self._settings = self.current()
+        self.keyForgotten.emit()
+        self.saved.emit(self._settings)
+
+    def _refresh_key_controls(self) -> None:
+        """Nothing to forget when nothing is stored."""
+        self.button_forget_key.setEnabled(secrets_store.has_agent_key())
+
     def _emit_saved(self) -> None:
         problems: list[str] = []
 
-        typed = self.agent_key.text().strip()
+        # Only in Live. The key field is hidden in Paper, and text left in it there
+        # was still being validated — so a stray character blocked every save with a
+        # complaint about a field the user could not see, let alone clear. A hidden
+        # control must not be able to refuse anything.
+        typed = (
+            self.agent_key.text().strip()
+            if self.mode.currentData() is TradingMode.LIVE
+            else ""
+        )
         if typed:
             try:
                 # The key goes straight to the credential store. It is never put on

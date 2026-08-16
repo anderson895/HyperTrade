@@ -308,6 +308,29 @@ Set it to `Off` to disable it.
 **STOP BOT does not close an open position.** It stops looking for entries and leaves the position
 with its stop and target in place. Use **Close position** to flatten.
 
+### Trades, and syncing from the wallet
+
+The Trades page shows the record **on the wallet**, not only the record this bot kept.
+**Sync from wallet** pulls Hyperliquid's own fill history and folds in anything missing.
+
+Each fill carries a `tid` that is unique to it, and the database rejects a second insert of
+the same one — so pressing the button twice adds nothing the second time, which is exactly
+what someone does when they are not sure it worked.
+
+A fill says what happened and at what price. It does **not** say why: nothing in it separates
+a stop from a target from someone pressing Close. So the sync makes a second call for the
+orders behind those fills and reads the type off them — `Stop Market`, `Take Profit Limit`,
+`Limit`. An exit whose order the exchange no longer reports is recorded as a manual close
+rather than presented as a stop it may never have been.
+
+**Synced trades are kept out of Statistics by default.** They are the account's record, not
+the bot's. A trade placed by hand on the same wallet would otherwise sit inside a win rate
+shown as the bot's performance with nothing on screen saying so — the Statistics page offers
+the wider view as a deliberate tick-box, and the Source column on Trades marks every row
+`bot` or `synced`.
+
+The button appears in Live only. A paper account has no wallet to read a history from.
+
 ### The chart
 
 **The chart runs whenever the app is open**, whether or not the bot is started. Candles load at

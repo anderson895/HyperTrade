@@ -65,6 +65,23 @@ _MIGRATIONS: list[str] = [
         payload    TEXT    NOT NULL
     );
     """,
+    # v4 — fills imported from the exchange, for "the record on the wallet" rather
+    # than "the record this bot kept".
+    #
+    # `exchange_id` is Hyperliquid's `tid`, unique per fill, so syncing twice adds
+    # nothing the second time. The index is partial: rows this bot placed have no
+    # exchange id and must not collide with each other on NULL.
+    #
+    # It also marks provenance, which matters more than it looks. Statistics counts
+    # bot fills only by default — a trade placed by hand on the same wallet would
+    # otherwise land in the win rate presented as the bot's record, with nothing on
+    # screen saying so.
+    """
+    ALTER TABLE fills ADD COLUMN exchange_id TEXT;
+
+    CREATE UNIQUE INDEX IF NOT EXISTS fills_exchange_id
+        ON fills (exchange_id) WHERE exchange_id IS NOT NULL;
+    """,
 ]
 
 

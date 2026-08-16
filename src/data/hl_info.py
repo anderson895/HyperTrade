@@ -26,6 +26,15 @@ class HyperliquidInfoError(RuntimeError):
     """The info endpoint was reachable but returned something unusable."""
 
 
+class InfoClientClosed(HyperliquidInfoError):
+    """A request was made after the client was closed — the app is shutting down.
+
+    A subclass so it is already covered by `FEED_ERRORS`: every handler that copes
+    with the exchange being unreachable copes with this too, and none of them has to
+    learn about shutdown.
+    """
+
+
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
@@ -63,7 +72,19 @@ class HyperliquidInfo:
             await self._client.aclose()
 
     async def _post(self, payload: dict[str, Any]) -> Any:
-        response = await self._client.post("/info", json=payload)
+        # Closing the window closes this client, and the refresh timer can already
+        # have a poll in flight. httpx raises a bare RuntimeError for that, which is
+        # not in FEED_ERRORS, so it surfaced as "background task failed" with a
+        # traceback — a shutdown reported as a crash. Checked first for the common
+        # case, and caught as well for the race where it closes mid-request.
+        if self._client.is_closed:
+            raise InfoClientClosed("the connection is closed")
+        try:
+            response = await self._client.post("/info", json=payload)
+        except RuntimeError as exc:
+            if "closed" not in str(exc):
+                raise
+            raise InfoClientClosed("the connection closed mid-request") from exc
         response.raise_for_status()
         return response.json()
 
@@ -108,6 +129,76 @@ class HyperliquidInfo:
         if coin not in mids:
             raise HyperliquidInfoError(f"no mid price for {coin}")
         return mids[coin]
+
+    # --- agent keys -------------------------------------------------------
+
+    async def agent_owner(self, agent_address: str) -> str | None:
+        """The main wallet an agent key may trade for, or None if it may not.
+
+        Reading a balance needs only an address, so a wrong agent key passes every
+        other check this app makes: the account value comes back, the connection
+        reads as healthy, and the key is not exercised until the first real order.
+        That is the worst possible moment to discover it.
+
+        Hyperliquid answers directly — an approved agent comes back as
+        `{"role": "agent", "data": {"user": "0x..."}}`, and anything else as
+        `{"role": "user"}`.
+        """
+        data = await self._post({"type": "userRole", "user": agent_address})
+        if not isinstance(data, dict) or data.get("role") != "agent":
+            return None
+        owner = (data.get("data") or {}).get("user")
+        return str(owner) if owner else None
+
+    async def agent_expiries(self, address: str) -> dict[str, int]:
+        """Approved agent address (lowercased) -> when its approval lapses, in ms.
+
+        An approval has a fixed lifetime. When it lapses the key stops being able to
+        order while everything else still looks fine, which is the same failure as a
+        wrong key arriving on a schedule.
+        """
+        data = await self._post({"type": "extraAgents", "user": address})
+        if not isinstance(data, list):
+            return {}
+        return {
+            str(entry["address"]).lower(): int(entry["validUntil"])
+            for entry in data
+            if entry.get("address") and entry.get("validUntil")
+        }
+
+    # --- trade history ----------------------------------------------------
+
+    async def user_fills(self, address: str) -> list[dict]:
+        """Every fill the exchange has for this wallet, newest first.
+
+        Hyperliquid returns roughly the last 2,000. Each carries a `tid` that is
+        unique per fill, which is what makes re-syncing safe.
+        """
+        data = await self._post({"type": "userFills", "user": address})
+        if not isinstance(data, list):
+            raise HyperliquidInfoError(f"userFills returned {type(data).__name__}: {data!r}")
+        return data
+
+    async def order_types(self, address: str) -> dict[int, str]:
+        """`oid` -> the order type that produced it, e.g. "Stop Market".
+
+        A fill says what happened and at what price, but not *why* — nothing in
+        `userFills` distinguishes a stop from a target from a manual exit. The order
+        behind it does, and fills carry the `oid` to find it. Without this, every
+        imported exit would have to be labelled a guess.
+        """
+        data = await self._post({"type": "historicalOrders", "user": address})
+        if not isinstance(data, list):
+            raise HyperliquidInfoError(
+                f"historicalOrders returned {type(data).__name__}: {data!r}"
+            )
+        types: dict[int, str] = {}
+        for entry in data:
+            order = entry.get("order", entry)
+            oid, kind = order.get("oid"), order.get("orderType")
+            if oid is not None and kind:
+                types[int(oid)] = kind
+        return types
 
     # --- candles ----------------------------------------------------------
 

@@ -173,6 +173,97 @@ def test_no_field_is_offered_in_a_mode_where_nothing_acts_on_it(qapp):
             assert label.isVisibleTo(page) is expected, f"{label.text()} caption in {mode}"
 
 
+def test_the_stored_key_can_be_removed(qapp, monkeypatch):
+    """Security: the key must not be permanent. "Leave blank to keep it" made it
+    unremovable - the only way to change it was to paste another over it."""
+    stored = {"key": "0x" + "ab" * 32}
+    monkeypatch.setattr("src.secrets_store.load_agent_key", lambda: stored.get("key"))
+    monkeypatch.setattr("src.secrets_store.has_agent_key", lambda: "key" in stored)
+    monkeypatch.setattr(
+        "src.secrets_store.delete_agent_key", lambda: stored.pop("key", None)
+    )
+
+    page = SettingsPage(AppSettings())
+    page.load(AppSettings(trading_mode=TradingMode.LIVE, account_address=LIVE_ADDRESS))
+    assert page.button_forget_key.isEnabled()
+
+    page.button_forget_key.click()
+
+    assert "key" not in stored  # actually gone from the credential store
+    assert not page.button_forget_key.isEnabled()  # nothing left to forget
+    assert page.agent_key.text() == ""
+
+
+def test_removing_the_key_stops_the_app_showing_a_live_account(qapp, monkeypatch):
+    """A balance is read from the address, which needs no key - so deleting the key
+    alone would leave a real account on screen that this app can no longer act on.
+    The mode drops with it."""
+    stored = {"key": "0x" + "ab" * 32}
+    monkeypatch.setattr("src.secrets_store.load_agent_key", lambda: stored.get("key"))
+    monkeypatch.setattr("src.secrets_store.has_agent_key", lambda: "key" in stored)
+    monkeypatch.setattr(
+        "src.secrets_store.delete_agent_key", lambda: stored.pop("key", None)
+    )
+
+    page = SettingsPage(AppSettings())
+    page.load(AppSettings(trading_mode=TradingMode.LIVE, account_address=LIVE_ADDRESS))
+
+    emitted, announced = [], []
+    page.saved.connect(emitted.append)
+    page.keyForgotten.connect(lambda: announced.append(1))
+    page.button_forget_key.click()
+
+    assert announced == [1]  # and said so, rather than left to be noticed
+    assert emitted, "removing the key must rewire the session, not just the form"
+    assert emitted[0].trading_mode is TradingMode.PAPER
+    assert not page.agent_key.isVisibleTo(page)
+
+
+def test_a_hidden_key_field_cannot_block_a_paper_save(qapp):
+    """Found live: switching Live -> Paper and saving was refused with "That does
+    not look like a private key" - about a field Paper mode hides. The user could
+    not see it to clear it, so every save failed with no way forward."""
+    page = SettingsPage(AppSettings())
+    page.load(AppSettings(trading_mode=TradingMode.LIVE))
+    page.agent_key.setText("not-a-key")
+
+    page.mode.setCurrentIndex(page.mode.findData(TradingMode.PAPER))
+    emitted = []
+    page.saved.connect(emitted.append)
+    page.button_save.click()
+
+    assert emitted, page.problem._label.text() if hasattr(page.problem, "_label") else "refused"
+    assert emitted[0].trading_mode is TradingMode.PAPER
+    # And nothing is left sitting in a box nobody can see.
+    assert page.agent_key.text() == ""
+
+
+def test_a_bad_key_is_still_refused_in_live_mode(qapp):
+    """The guard above must not become a way to save a broken key."""
+    page = SettingsPage(AppSettings())
+    page.load(AppSettings(trading_mode=TradingMode.LIVE, account_address=LIVE_ADDRESS))
+    page.agent_key.setText("not-a-key")
+
+    emitted = []
+    page.saved.connect(emitted.append)
+    page.button_save.click()
+
+    assert not emitted
+
+
+def test_reset_paper_is_not_offered_against_a_live_account(qapp):
+    """Found live: it raised AttributeError - 'LiveBroker' object has no attribute
+    'reset' - inside a fire-and-forget task, so the traceback went to the log and
+    the user saw nothing happen at all."""
+    page = SettingsPage(AppSettings())
+
+    page.load(AppSettings(trading_mode=TradingMode.PAPER))
+    assert page.button_reset.isVisibleTo(page)
+
+    page.load(AppSettings(trading_mode=TradingMode.LIVE))
+    assert not page.button_reset.isVisibleTo(page)
+
+
 def test_the_paper_balance_is_hidden_in_live_mode(qapp):
     """It does nothing in Live - the balance is whatever the exchange says. On
     screen beside real credentials it reads as a starting stake for real money."""
@@ -1114,8 +1205,76 @@ def test_trades_page_lists_recorded_fills(qapp, conn):
 
     assert page.table.rowCount() == 2
     assert page.table.item(0, 3).text() == "take profit"  # newest first
-    assert "+99.70" in page.table.item(0, 7).text()
+    # Read off the page's own constant: this was a hardcoded 7 and broke the day a
+    # column was inserted before it, which says nothing about the trades page.
+    assert "+99.70" in page.table.item(0, TradesPage.PNL_COLUMN).text()
+    assert page.table.item(0, TradesPage.SOURCE_COLUMN).text() == "bot"
     assert "1 closed" in page.summary.text()
+    # No handler passed, so there is nothing to sync from and no button offered.
+    assert not page.button_sync.isVisibleTo(page)
+
+
+def test_the_sync_button_is_offered_only_where_there_is_a_wallet(qapp, conn):
+    """Paper has no wallet to read a history from, so the button there would be a
+    control whose only possible outcome is an error message."""
+    calls = []
+    page = TradesPage(conn, on_sync=lambda: calls.append(1))
+
+    page.reload(TradingMode.PAPER)
+    assert not page.button_sync.isVisibleTo(page)
+
+    page.reload(TradingMode.LIVE)
+    assert page.button_sync.isVisibleTo(page)
+
+    page.button_sync.click()
+    assert calls == [1]
+
+
+def test_the_trades_page_marks_which_rows_came_from_the_wallet(qapp, conn):
+    from src.store import import_exchange_fills
+
+    record_fill(
+        conn, TradingMode.LIVE,
+        Fill(1_700_000_000_000, "BTC", Side.LONG, 0.05, 63_000.0, 0.14, FillReason.ENTRY),
+    )
+    import_exchange_fills(
+        conn, TradingMode.LIVE,
+        [{
+            "coin": "BTC", "px": "62428.0", "sz": "0.00136", "time": 1_700_000_100_000,
+            "dir": "Open Long", "closedPnl": "0.0", "oid": 1, "fee": "0.03", "tid": 77,
+        }],
+        {1: "Limit"},
+    )
+
+    page = TradesPage(conn)
+    page.reload(TradingMode.LIVE)
+
+    sources = {
+        page.table.item(row, TradesPage.SOURCE_COLUMN).text()
+        for row in range(page.table.rowCount())
+    }
+    assert sources == {"bot", "synced"}
+
+
+def test_statistics_page_can_widen_to_the_whole_wallet(qapp, conn):
+    """Off by default: these figures get shown as the bot's record."""
+    from src.store import import_exchange_fills
+
+    import_exchange_fills(
+        conn, TradingMode.LIVE,
+        [{
+            "coin": "BTC", "px": "61759.0", "sz": "0.00136", "time": 1_700_000_100_000,
+            "dir": "Close Long", "closedPnl": "-0.95", "oid": 2, "fee": "0.03", "tid": 88,
+        }],
+        {2: "Stop Market"},
+    )
+
+    page = StatsPage(conn)
+    page.refresh(TradingMode.LIVE)
+    assert "Closed Trades: 0" in page._labels["Closed Trades"].text()
+
+    page.include_synced.setChecked(True)  # refreshes itself
+    assert "Closed Trades: 1" in page._labels["Closed Trades"].text()
 
 
 def test_stats_page_summarises_closed_trades(qapp, conn):
